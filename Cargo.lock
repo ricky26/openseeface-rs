@@ -1546,6 +1546,7 @@ dependencies = [
  "nokhwa-bindings-macos",
  "nokhwa-bindings-windows",
  "nokhwa-core",
+ "parking_lot",
  "paste",
  "thiserror 2.0.11",
 ]
@@ -1744,6 +1745,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossbeam-channel",
  "ctrlc",
  "nokhwa",
  "openseeface",

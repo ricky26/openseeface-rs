@@ -1,13 +1,13 @@
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
-use nokhwa::Camera;
-use tracing::info;
-
+use nokhwa::CallbackCamera;
+use tracing::{event, info, span, Level};
+use tracing_subscriber::{EnvFilter, Registry};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use openseeface::tracker::{Tracker, TrackerConfig};
 
 #[derive(Parser)]
@@ -19,8 +19,29 @@ struct Options {
     pub camera: Option<u32>,
 }
 
+fn init_tracing() {
+    let filter_layer = EnvFilter::builder()
+        .with_default_directive(Level::INFO.into())
+        .from_env_lossy();
+    let subscriber = Registry::default().with(filter_layer);
+
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    #[cfg(feature = "tracing")]
+    let fmt_layer = tracing_subscriber::layer::Layer::with_filter(fmt_layer, tracing_subscriber::filter::filter_fn(|meta| {
+        meta.fields().field("tracy.frame_mark").is_none()
+    }));
+
+    let subscriber = subscriber.with(fmt_layer);
+
+    #[cfg(feature = "tracing")]
+    let subscriber = subscriber.with(tracing_tracy::TracyLayer::default());
+
+    subscriber.init();
+}
+
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_tracing();
     let opts = Options::parse();
 
     if opts.list {
@@ -34,38 +55,41 @@ fn main() -> anyhow::Result<()> {
     let camera_index = opts.camera.unwrap_or(0);
     let requested_format =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
-    let mut camera = Camera::new(CameraIndex::Index(camera_index), requested_format)?;
+
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+    let frame_tx_clone = frame_tx.clone();
+    let mut camera = CallbackCamera::new(CameraIndex::Index(camera_index), requested_format, move |buffer| {
+        let span = span!(Level::DEBUG, "camera frame");
+        let _span = span.enter();
+        frame_tx_clone.send(Some(buffer)).ok();
+    })?;
 
     let config = TrackerConfig {
         ..Default::default()
     };
 
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
     ctrlc::set_handler(move || {
-        running_clone.store(false, Ordering::Relaxed);
+        frame_tx.send(None).ok();
     })?;
 
-    info!(
-        "Starting camera stream {:?}@{}",
-        camera.resolution(),
-        camera.frame_rate()
-    );
+    let camera_format = camera.camera_format()?;
+    info!("Starting camera stream {}", camera_format);
     camera.open_stream()?;
 
     let mut tracker = Tracker::new(config)?;
     let epoch = Instant::now();
-    while running.load(Ordering::Relaxed) {
+    while let Ok(Some(frame)) = frame_rx.recv() {
+        let span = span!(Level::DEBUG, "frame");
+        let _span = span.enter();
+
         let now = Instant::now();
         let now64 = (now - epoch).as_secs_f64();
 
-        let frame = camera.frame()?;
-        let image = frame.decode_image::<RgbFormat>()?;
-
-        info!("frame {:?}", frame.resolution());
-
-        // ...
+        let image = span!(Level::DEBUG, "decode").in_scope(|| frame.decode_image::<RgbFormat>())?;
         tracker.detect(&image, now64)?;
+
+        #[cfg(feature = "tracing")]
+        event!(Level::DEBUG, message = "frame end", tracy.frame_mark = true);
     }
 
     camera.stop_stream()?;

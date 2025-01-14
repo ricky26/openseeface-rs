@@ -1,11 +1,11 @@
 use glam::{uvec2, vec3, vec4, UVec2, Vec3, Vec4};
-use image::{RgbImage, Rgba32FImage};
-use ndarray::ArrayView;
+use image::{Rgb32FImage, RgbImage};
+use ndarray::{s, ArrayView, ShapeBuilder};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
 use crate::face::{TrackedFace, DEFAULT_FACE};
-use crate::image::resize_linear_rgba;
+use crate::image::resize_linear_rgb;
 use crate::retinaface::RetinaFaceDetector;
 
 const MODEL_0: &'static [u8] = include_bytes!("../models/lm_model0_opt.onnx");
@@ -101,17 +101,20 @@ pub struct Tracker {
     sessions: Vec<Session>,
     gaze_session: Session,
     face_detect: Session,
-    face_detect_224: Rgba32FImage,
+    face_detect_224: Rgb32FImage,
     mean: Vec3,
     std: Vec3,
     frame_count: usize,
     tracked_faces: Vec<TrackedFace>,
-    detected: usize,
     wait_count: usize,
-    new_faces: Vec<Vec4>,
+    face_boxes: Vec<Vec4>,
 }
 
 impl Tracker {
+    pub fn face_boxes(&self) -> &[Vec4] {
+        &self.face_boxes
+    }
+
     pub fn new(
         config: TrackerConfig,
     ) -> Result<Tracker, ort::Error> {
@@ -161,9 +164,6 @@ impl Tracker {
         let mean = vec3(0.485, 0.456, 0.406);
         let std = vec3(0.229, 0.224, 0.225);
         let mean = mean / std;
-        let std = std * 255.;
-
-        let mean = -mean;
         let std = 1. / std;
 
         let face_3d = DEFAULT_FACE;
@@ -174,7 +174,7 @@ impl Tracker {
             tracked_faces.push(TrackedFace::new(i, contour_indices));
         }
 
-        let face_detect_224 = Rgba32FImage::new(224, 224);
+        let face_detect_224 = Rgb32FImage::new(224, 224);
 
         Ok(Self {
             config,
@@ -190,29 +190,70 @@ impl Tracker {
             std,
             frame_count: 0,
             tracked_faces,
-            detected: 0,
             wait_count: 0,
-            new_faces: Vec::new(),
+            face_boxes: Vec::new(),
         })
     }
 
+    #[tracing::instrument(skip_all)]
     fn detect_faces(&mut self, frame: &RgbImage) -> Result<(), ort::Error> {
-        resize_linear_rgba(frame, &mut self.face_detect_224);
+        resize_linear_rgb(frame, &mut self.face_detect_224);
+        for pixel in self.face_detect_224.pixels_mut() {
+            pixel.0 = (Vec3::from_array(pixel.0) * self.std - self.mean).to_array();
+        }
 
-        let input = ArrayView::from_shape((1, 3, 224, 224), self.face_detect_224.as_raw())
-            .unwrap();
-        self.face_detect.run(ort::inputs![input]?)?;
+        tracing::info!("std={} mean={}", self.std, self.mean);
+
+        let input = ArrayView::from_shape((1, 224, 224, 3), self.face_detect_224.as_raw())
+            .unwrap()
+            .permuted_axes((0, 3, 1, 2));
+        tracing::info!("input strides={:?} {input:?}", input.strides());
+        let output = self.face_detect.run(ort::inputs![input]?)?;
+        let max_pool = output["maxpool"].try_extract_tensor::<f32>()?;
+        let output = output["output"].try_extract_tensor::<f32>()?;
+
+        tracing::info!("output {output:?}");
+        tracing::info!("max_pool {max_pool:?}");
+
+        let scale_x = (frame.width() as f32) / 224.;
+        let scale_y = (frame.height() as f32) / 224.;
+
+        for x in 0..56 {
+            for y in 0..56 {
+                let c = output[[0, 0, y, x]];
+                if c < self.config.detection_threshold {
+                    continue;
+                }
+
+                let xc = max_pool[[0, 0, y, x]];
+                if xc != c {
+                    continue;
+                }
+
+                let r = output[[0, 1, y, x]] * 112.;
+                let x = (x as f32 * 4. - r) * scale_x;
+                let y = (y as f32 * 4. - r) * scale_y;
+                let w = (2. * r) * scale_x;
+                let h = (2. * r) * scale_y;
+                tracing::info!("face {x},{y} {w},{h}");
+                self.face_boxes.push(vec4(x, y, w, h));
+            }
+        }
 
         Ok(())
     }
 
+    #[tracing::instrument(skip_all)]
     pub fn detect(&mut self, frame: &RgbImage, now: f64) -> Result<(), ort::Error> {
+        // TODO: remove this
+        self.face_boxes.clear();
+
         self.frame_count += 1;
         self.wait_count += 1;
 
-        if self.detected == 0 {
+        if self.face_boxes.is_empty() {
             if self.config.use_retina_face {
-                self.retina_face_detect.detect(frame, &mut self.new_faces)?;
+                self.retina_face_detect.detect(frame, &mut self.face_boxes)?;
             }
 
             if self.config.use_internal_face_detection {
@@ -220,15 +261,15 @@ impl Tracker {
             }
 
             if self.config.assume_fullscreen_face {
-                self.new_faces.push(vec4(0., 0., self.config.size.x as f32, self.config.size.y as f32));
+                self.face_boxes.push(vec4(0., 0., self.config.size.x as f32, self.config.size.y as f32));
             }
 
             self.wait_count = 0;
-        } else if self.detected >= self.config.max_faces {
+        } else if self.face_boxes.len() >= self.config.max_faces {
             self.wait_count = 0;
         } else if self.wait_count >= self.config.scan_every {
             if self.config.use_retina_face {
-                self.retina_face_scan.detect(frame, &mut self.new_faces)?;
+                self.retina_face_scan.detect(frame, &mut self.face_boxes)?;
             }
 
             if self.config.use_internal_face_detection {
@@ -238,7 +279,7 @@ impl Tracker {
             self.wait_count = 0;
         }
 
-        if self.new_faces.is_empty() {
+        if self.face_boxes.is_empty() {
             // ...
             return Ok(());
         }
