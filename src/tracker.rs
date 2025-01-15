@@ -202,18 +202,12 @@ impl Tracker {
             pixel.0 = (Vec3::from_array(pixel.0) * self.std - self.mean).to_array();
         }
 
-        tracing::info!("std={} mean={}", self.std, self.mean);
-
         let input = ArrayView::from_shape((1, 224, 224, 3), self.face_detect_224.as_raw())
             .unwrap()
             .permuted_axes((0, 3, 1, 2));
-        tracing::info!("input strides={:?} {input:?}", input.strides());
         let output = self.face_detect.run(ort::inputs![input]?)?;
         let max_pool = output["maxpool"].try_extract_tensor::<f32>()?;
         let output = output["output"].try_extract_tensor::<f32>()?;
-
-        tracing::info!("output {output:?}");
-        tracing::info!("max_pool {max_pool:?}");
 
         let scale_x = (frame.width() as f32) / 224.;
         let scale_y = (frame.height() as f32) / 224.;
@@ -235,7 +229,7 @@ impl Tracker {
                 let y = (y as f32 * 4. - r) * scale_y;
                 let w = (2. * r) * scale_x;
                 let h = (2. * r) * scale_y;
-                tracing::info!("face {x},{y} {w},{h}");
+                // tracing::info!("face {x},{y} {w},{h}");
                 self.face_boxes.push(vec4(x, y, w, h));
             }
         }

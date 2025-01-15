@@ -1,0 +1,15 @@
+[package]
+name = "openseeface-demo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+openseeface = { path = ".." }
+clap = { version = "4.5.26", features = ["derive"] }
+anyhow = "1.0.95"
+crossbeam-channel = "0.5.14"
+nokhwa = { version = "0.10.7", features = ["input-native", "output-threaded"] }
+bevy = "0.15.1"
+bevy_egui = "0.31.1"
+bevy-inspector-egui = "0.28.1"
+image = "0.25.5"
