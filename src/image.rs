@@ -1,4 +1,5 @@
 use std::ops::{Deref, DerefMut};
+use glam::{vec4, Vec4};
 use image::{ImageBuffer, Pixel, Rgb};
 
 pub(crate) trait FromColorValue<T> {
@@ -47,7 +48,7 @@ fn lerp_rgb_f32(a: Rgb<f32>, b: Rgb<f32>, x: f32) -> Rgb<f32> {
 }
 
 #[tracing::instrument(skip_all)]
-pub(crate) fn resize_linear_rgb<P1, C1, P2, C2>(src: &ImageBuffer<P1, C1>, dest: &mut ImageBuffer<P2, C2>)
+pub(crate) fn resize_linear_rgb_area<P1, C1, P2, C2>(src: &ImageBuffer<P1, C1>, dest: &mut ImageBuffer<P2, C2>, area: Vec4)
 where
     P1: Pixel,
     f32: FromColorValue<<P1 as Pixel>::Subpixel>,
@@ -58,14 +59,17 @@ where
 {
     let src_w = src.width();
     let src_h = src.height();
-    let scale_x = (src_w as f32) / (dest.width() as f32);
-    let scale_y = (src_h as f32) / (dest.height() as f32);
     let max_x = src_w.saturating_sub(2);
     let max_y = src_h.saturating_sub(2);
 
+    let area_w = area.z - area.x;
+    let area_h = area.w - area.y;
+    let scale_x = area_w / (dest.width() as f32);
+    let scale_y = area_h / (dest.height() as f32);
+
     for (x, y, pixel) in dest.enumerate_pixels_mut() {
-        let x_f = scale_x * (x as f32);
-        let y_f = scale_y * (y as f32);
+        let x_f = scale_x * (x as f32) + area.x;
+        let y_f = scale_y * (y as f32) + area.y;
 
         let src_x = (x_f as u32).min(max_x);
         let src_y = (y_f as u32).min(max_y);
@@ -87,4 +91,18 @@ where
         channels[1] = FromColorValue::from_color_value(g[1]);
         channels[2] = FromColorValue::from_color_value(g[2]);
     }
+}
+
+#[tracing::instrument(skip_all)]
+pub(crate) fn resize_linear_rgb<P1, C1, P2, C2>(src: &ImageBuffer<P1, C1>, dest: &mut ImageBuffer<P2, C2>)
+where
+    P1: Pixel,
+    f32: FromColorValue<<P1 as Pixel>::Subpixel>,
+    C1: Deref<Target=[P1::Subpixel]>,
+    P2: Pixel,
+    <P2 as Pixel>::Subpixel: FromColorValue<f32>,
+    C2: Deref<Target=[P2::Subpixel]> + DerefMut,
+{
+    let area = vec4(0., 0., src.width() as f32, src.height() as f32);
+    resize_linear_rgb_area(src, dest, area)
 }

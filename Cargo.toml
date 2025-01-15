@@ -16,6 +16,7 @@ similari = "0.26.2"
 nokhwa = "0.10.7"
 nokhwa-bindings-linux = "0.1.1"
 image = "0.25.5"
+imageproc = "0.25.0"
 
 [workspace]
 members = [ "demo",

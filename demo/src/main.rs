@@ -83,7 +83,7 @@ fn main() -> anyhow::Result<()> {
         },
         TextureDimension::D2,
         &[0, 0, 0, 0],
-        TextureFormat::Rgba8Unorm,
+        TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::all(),
     );
 
@@ -197,6 +197,8 @@ pub fn handle_new_camera_frames(
             warn!("failed to track frame: {err}");
         }
 
+        let span = span!(Level::DEBUG, "upload texture");
+        let _span = span.enter();
         let Some(texture) = images.get_mut(&camera_image.0) else {
             return;
         };
