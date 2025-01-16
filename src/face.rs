@@ -1,7 +1,8 @@
-use glam::{vec3, Vec2, Vec3};
+use glam::{vec3, Mat3, Vec2, Vec3};
 use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
-use std::f32::consts::PI;
+
+use crate::geometry::align_points;
 
 pub const DEFAULT_FACE: [Vec3; 70] = [
     vec3(0.4551769692672, 0.300895790030204, -0.764429433974752),
@@ -76,36 +77,6 @@ pub const DEFAULT_FACE: [Vec3; 70] = [
     vec3(0.257990002632141, 0.276080012321472, -0.324570998549461),
     vec3(-0.257990002632141, 0.276080012321472, -0.324570998549461),
 ];
-
-fn rotate(origin: Vec2, point: Vec2, a: f32) -> Vec2 {
-    let a = -a;
-    origin + Vec2::from_angle(-a).rotate(point - origin)
-}
-
-fn angle(p1: Vec2, p2: Vec2) -> f32 {
-    let delta = p2 - p1;
-    delta.y.atan2(delta.x) % (2. * PI)
-}
-
-fn normalise_angle(mut angle: f32) -> f32 {
-    while angle < -PI / 2. {
-        angle += PI;
-    }
-
-    while angle > PI / 2. {
-        angle -= PI;
-    }
-
-    angle
-}
-
-fn align_points(a: Vec2, b: Vec2, points: &mut [Vec2]) -> f32 {
-    let alpha = normalise_angle(angle(a, b));
-    for point in points {
-        *point = rotate(a, *point, alpha);
-    }
-    alpha
-}
 
 #[derive(Clone, Debug)]
 struct FeatureConfig {
@@ -495,37 +466,69 @@ impl FeatureExtractor {
 }
 
 pub struct TrackedFace {
-    id: usize,
-    alive: bool,
-    frame_count: usize,
-    contour_indices: &'static [usize],
-    face_3d: [Vec3; 70],
-    contour: Vec<Vec3>,
+    pub(crate) id: usize,
+    pub(crate) alive: bool,
+    pub(crate) frame_count: usize,
+    pub(crate) position: Vec2,
+    pub(crate) landmarks: Vec<(Vec2, f32)>,
+    pub(crate) face_3d: [Vec3; 70],
+    pub(crate) contour_2d: Vec<Vec2>,
+    pub(crate) translation: Vec3,
+    pub(crate) rotation: Mat3,
 }
 
 impl TrackedFace {
-    pub fn new(id: usize, contour_indices: &'static [usize]) -> TrackedFace {
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive
+    }
+
+    pub fn position(&self) -> Vec2 {
+        self.position
+    }
+
+    pub fn landmarks(&self) -> &[(Vec2, f32)] {
+        &self.landmarks
+    }
+
+    pub(crate) fn contour_2d(&self) -> &[Vec2] {
+        &self.contour_2d
+    }
+
+    pub fn translation(&self) -> Vec3 {
+        self.translation
+    }
+
+    pub fn rotation(&self) -> Mat3 {
+        self.rotation
+    }
+
+    pub fn new(id: usize) -> TrackedFace {
         let face_3d = DEFAULT_FACE;
 
         TrackedFace {
             id,
             alive: false,
+            position: Vec2::ZERO,
             frame_count: 0,
-            contour_indices,
+            landmarks: Vec::with_capacity(70),
             face_3d,
-            contour: Vec::new(),
+            contour_2d: Vec::new(),
+            translation: Vec3::ZERO,
+            rotation: Mat3::IDENTITY,
         }
     }
 
-    fn update_contour(&mut self) {
-        self.contour.clear();
-        self.contour.extend(self.contour_indices.iter()
-            .copied()
-            .map(|idx| self.face_3d[idx]));
+    pub(crate) fn update_contour(&mut self, indices: &[usize]) {
+        self.contour_2d.clear();
+        self.contour_2d.extend(indices.iter()
+            .map(|&idx| self.landmarks[idx].0));
     }
 
     pub fn reset(&mut self) {
         self.alive = false;
     }
-
 }

@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
-use glam::{ivec2, IVec2, Vec4};
-use image::RgbImage;
+use glam::{ivec2, IVec2, Vec2, Vec4};
+use image::Rgb32FImage;
 use ndarray::Array1;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -44,7 +44,9 @@ impl RetinaFaceDetector {
         })
     }
 
-    pub fn detect(&self, frame: &RgbImage, faces: &mut Vec<Vec4>) -> Result<(), ort::Error> {
+    pub fn detect(
+        &self, frame: &Rgb32FImage, faces: &mut Vec<(Vec2, Vec2)>,
+    ) -> Result<(), ort::Error> {
         let outputs = self.session.run(ort::inputs!{
             "input0" => Array1::<f32>::zeros(0),
         }?)?;

@@ -1,12 +1,18 @@
-use glam::{uvec2, vec2, vec3, vec4, UVec2, Vec2, Vec3, Vec4};
-use image::{Rgb32FImage, RgbImage};
-use ndarray::{s, ArrayView};
+use std::path::Path;
+use std::sync::LazyLock;
+
+use glam::{uvec2, vec2, vec3, vec4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use image::{GenericImage, GenericImageView, Rgb, Rgb32FImage, SubImage};
+use imageproc::geometric_transformations::{warp_into, Interpolation, Projection};
+use ndarray::{s, ArrayViewD, Axis};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
 use crate::face::{TrackedFace, DEFAULT_FACE};
-use crate::image::{resize_linear_rgb, resize_linear_rgb_area};
+use crate::geometry::{compensate, rotate};
+use crate::image::ImageArrayExt;
 use crate::retinaface::RetinaFaceDetector;
+use crate::sqpnp::SqPnPSolver;
 
 const MODEL_0: &'static [u8] = include_bytes!("../models/lm_model0_opt.onnx");
 const MODEL_1: &'static [u8] = include_bytes!("../models/lm_model1_opt.onnx");
@@ -55,6 +61,71 @@ fn logit(x: f32, factor: f32) -> f32 {
     x.ln() / factor
 }
 
+struct ImagePreparer {
+    std: Vec3,
+    mean: Vec3,
+    default: Vec3,
+}
+
+impl ImagePreparer {
+    pub fn prepare_image_warp(
+        &self, out: &mut Rgb32FImage, frame: &Rgb32FImage, projection: &Projection,
+    ) {
+        warp_into(
+            frame,
+            projection,
+            Interpolation::Bilinear,
+            Rgb(self.default.to_array()),
+            out,
+        );
+        for pixel in out.pixels_mut() {
+            pixel.0 = (Vec3::from_array(pixel.0) * self.std - self.mean).to_array();
+        }
+    }
+
+    pub fn prepare_sub_image(&self, out: &mut Rgb32FImage, frame: &SubImage<&Rgb32FImage>) {
+        let (x, y) = frame.offsets();
+        let (w, h) = frame.dimensions();
+        let projection = Projection::scale(
+            (out.width() as f32) / (w as f32),
+            (out.height() as f32) / (h as f32),
+        ) * Projection::translate(-(x as f32), -(y as f32));
+        self.prepare_image_warp(out, frame.inner(), &projection)
+    }
+
+    pub fn prepare_image(&self, out: &mut Rgb32FImage, frame: &Rgb32FImage) {
+        let frame_size = uvec2(frame.width(), frame.height());
+        let out_size = uvec2(out.width(), out.height());
+        let base_scale = out_size.as_vec2() / frame_size.as_vec2();
+        let scale = base_scale.x.min(base_scale.y);
+        let offset = ((out_size.as_vec2() - frame_size.as_vec2() * scale) / 2.).floor();
+        let projection = Projection::translate(offset.x, offset.y)
+            * Projection::scale(scale, scale);
+        self.prepare_image_warp(out, frame, &projection)
+    }
+
+    #[allow(dead_code)]
+    pub fn save(
+        &self, frame: &Rgb32FImage,
+        path: impl AsRef<Path>,
+    ) -> Result<(), image::ImageError> {
+        let mut tmp = frame.clone();
+        for pixel in tmp.pixels_mut() {
+            pixel.0 = ((Vec3::from_array(pixel.0) + self.mean) / self.std).to_array();
+        }
+        tmp.save(path)
+    }
+}
+
+static IMAGE_PREPARER: LazyLock<ImagePreparer> = LazyLock::new(|| {
+    let mean = vec3(0.485, 0.456, 0.406);
+    let std = vec3(0.229, 0.224, 0.225);
+    let default = mean;
+    let mean = mean / std;
+    let std = 1. / std;
+    ImagePreparer { std, mean, default }
+});
+
 #[derive(Clone, Debug)]
 pub struct TrackerConfig {
     pub size: UVec2,
@@ -98,12 +169,50 @@ impl Default for TrackerConfig {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct PendingEye {
+    pub open: f32,
+    pub position: Vec2,
+    pub confidence: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PendingFace {
+    pub landmarks: Vec<(Vec2, f32)>,
+    pub eye_r: PendingEye,
+    pub eye_l: PendingEye,
+    pub disabled: bool,
+    pub confidence: f32,
+    pub centre: Vec2,
+    pub bounds_min: Vec2,
+    pub bounds_max: Vec2,
+}
+
+impl PendingFace {
+    fn update_bounds(&mut self) {
+        let (min, max) = self.landmarks.iter()
+            .fold(None, |acc, &(p, _)| {
+                if let Some((min, max)) = acc {
+                    Some((p.min(min), p.max(max)))
+                } else {
+                    Some((p, p))
+                }
+            })
+            .unwrap();
+        self.bounds_min = min;
+        self.bounds_max = max;
+        self.centre = (min + max) * 0.5;
+    }
+}
+
 pub struct Tracker {
     config: TrackerConfig,
     res: u32,
     out_res: u32,
     logit_factor: f32,
     face_3d: [Vec3; 70],
+    contour_indices: &'static [usize],
+    contour_3d: Vec<Vec3>,
     retina_face_detect: RetinaFaceDetector,
     retina_face_scan: RetinaFaceDetector,
     session: Session,
@@ -112,23 +221,32 @@ pub struct Tracker {
     face_detect: Session,
     face_detect_224: Rgb32FImage,
     face_scratch_res: Rgb32FImage,
-    mean: Vec3,
-    std: Vec3,
+    eye_scratch_32: Rgb32FImage,
+    eyes_scratch_32: Rgb32FImage,
+    image_prep: &'static ImagePreparer,
     frame_count: usize,
     tracked_faces: Vec<TrackedFace>,
+    num_tracked_faces: usize,
     wait_count: usize,
-    face_boxes: Vec<Vec4>,
+    face_boxes: Vec<(Vec2, Vec2)>,
     crops: Vec<(Vec4, Vec2, f32)>,
-    landmarks: Vec<(Vec2, f32)>,
+    pending_faces: Vec<PendingFace>,
+    num_pending_faces: usize,
+    pending_face_indices: Vec<usize>,
+    pnp: SqPnPSolver,
 }
 
 impl Tracker {
-    pub fn face_boxes(&self) -> &[Vec4] {
+    pub fn face_boxes(&self) -> &[(Vec2, Vec2)] {
         &self.face_boxes
     }
 
     pub fn faces(&self) -> &[TrackedFace] {
-        &self.tracked_faces
+        &self.tracked_faces[..self.num_tracked_faces]
+    }
+
+    pub fn pending_faces(&self) -> &[PendingFace] {
+        &self.pending_faces[..self.num_pending_faces]
     }
 
     pub fn new(
@@ -177,17 +295,15 @@ impl Tracker {
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_DETECTION)?;
 
-        let mean = vec3(0.485, 0.456, 0.406);
-        let std = vec3(0.229, 0.224, 0.225);
-        let mean = mean / std;
-        let std = 1. / std;
-
         let face_3d = DEFAULT_FACE;
         let mut tracked_faces = Vec::with_capacity(config.max_faces);
         let contour_indices = if config.model_type == TrackerModel::ModelT { &CONTOUR_INDICES_T[..] } else { &CONTOUR_INDICES };
+        let contour_3d = contour_indices.iter()
+            .map(|&idx| face_3d[idx])
+            .collect();
 
         for i in 0..config.max_faces {
-            tracked_faces.push(TrackedFace::new(i, contour_indices));
+            tracked_faces.push(TrackedFace::new(i));
         }
 
         let (res, out_res, logit_factor) = match config.model_type {
@@ -198,6 +314,16 @@ impl Tracker {
 
         let face_detect_224 = Rgb32FImage::new(224, 224);
         let face_scratch_res = Rgb32FImage::new(res, res);
+        let eye_scratch_32 = Rgb32FImage::new(32, 32);
+        let eyes_scratch_32 = Rgb32FImage::new(32, 64);
+        let image_prep = &*IMAGE_PREPARER;
+
+        let pending_faces = vec![PendingFace {
+            landmarks: Vec::with_capacity(70),
+            ..Default::default()
+        }; config.max_faces];
+        let pending_face_indices = Vec::with_capacity(pending_faces.len());
+        let pnp = SqPnPSolver::new();
 
         Ok(Self {
             config,
@@ -205,6 +331,8 @@ impl Tracker {
             out_res,
             logit_factor,
             face_3d,
+            contour_indices,
+            contour_3d,
             retina_face_detect: face_detector,
             retina_face_scan: face_detector_scan,
             session,
@@ -213,33 +341,36 @@ impl Tracker {
             face_detect: gaze_detection,
             face_detect_224,
             face_scratch_res,
-            mean,
-            std,
+            eye_scratch_32,
+            eyes_scratch_32,
+            image_prep,
             frame_count: 0,
             tracked_faces,
+            num_tracked_faces: 0,
             wait_count: 0,
             face_boxes: Vec::new(),
             crops: Vec::new(),
-            landmarks: Vec::with_capacity(70),
+            pending_faces,
+            num_pending_faces: 0,
+            pending_face_indices,
+            pnp,
         })
     }
 
     #[tracing::instrument(skip_all)]
-    fn detect_faces(&mut self, frame: &RgbImage) -> Result<(), ort::Error> {
-        resize_linear_rgb(frame, &mut self.face_detect_224);
-        for pixel in self.face_detect_224.pixels_mut() {
-            pixel.0 = (Vec3::from_array(pixel.0) * self.std - self.mean).to_array();
-        }
-
-        let input = ArrayView::from_shape((1, 224, 224, 3), self.face_detect_224.as_raw())
-            .unwrap()
+    fn detect_faces(&mut self, frame: &Rgb32FImage) -> Result<(), ort::Error> {
+        self.image_prep.prepare_image(&mut self.face_detect_224, frame);
+        let input = self.face_detect_224.as_view()
+            .insert_axis(Axis(0))
             .permuted_axes((0, 3, 1, 2));
         let output = self.face_detect.run(ort::inputs![input]?)?;
         let max_pool = output["maxpool"].try_extract_tensor::<f32>()?;
         let output = output["output"].try_extract_tensor::<f32>()?;
 
-        let scale_x = (frame.width() as f32) / 224.;
-        let scale_y = (frame.height() as f32) / 224.;
+        let frame_size = uvec2(frame.width(), frame.height());
+        let square_size = frame_size.x.max(frame_size.y);
+        let scale = (square_size as f32) / 224.;
+        let offset = ((UVec2::splat(square_size) - frame_size) / 2).as_vec2();
 
         for x in 0..56 {
             for y in 0..56 {
@@ -254,31 +385,226 @@ impl Tracker {
                 }
 
                 let r = output[[0, 1, y, x]] * 112.;
-                let x = (x as f32 * 4. - r) * scale_x;
-                let y = (y as f32 * 4. - r) * scale_y;
-                let w = (2. * r) * scale_x;
-                let h = (2. * r) * scale_y;
-                self.face_boxes.push(vec4(x, y, w, h));
+                let x = (x as f32 * 4. - r) * scale - offset.x;
+                let y = (y as f32 * 4. - r) * scale - offset.y;
+                let w = (2. * r) * scale;
+                let h = (2. * r) * scale;
+                self.face_boxes.push((vec2(x, y), vec2(w, h)));
             }
         }
 
         Ok(())
     }
 
-    /*
-    fn prepare_eye(&mut self, )
+    fn corners_to_eye(inner: Vec2, outer: Vec2, size: Vec2) -> (Vec2, Vec2, f32) {
+        let (outer_flat, a) = compensate(inner, outer);
+        let center = (inner + outer_flat) / 2.;
+        let radius = (inner - center).length();
+        let eye_size = vec2(1.4, 1.2) * radius;
+        let tl = (center - eye_size).clamp(Vec2::ZERO, size);
+        let br = (center + eye_size).clamp(Vec2::ZERO, size);
+        (tl, br, a)
+    }
 
-    fn detect_eyes(&mut self) -> (Vec4, Vec4) {
+    fn prepare_eye(
+        &mut self, frame: &Rgb32FImage, inner: Vec2, outer: Vec2, flip: bool,
+    ) -> (Vec2, Vec2, Vec2, f32) {
+        let size = uvec2(frame.width(), frame.height()).as_vec2();
+        let (tl, br, a) = Self::corners_to_eye(inner, outer, size);
+
+        let base_scale = 32. / (br - tl);
+        let mut scale_x = base_scale.x;
+        let scale_y = -base_scale.y;
+        let mut offset = vec2(tl.x, br.y);
+        if flip {
+            scale_x *= -1.;
+            offset.x = br.x;
+        }
+        let projection = Projection::scale(scale_x, scale_y)
+            * Projection::translate(inner.x - offset.x, inner.y - offset.y)
+            * Projection::rotate(a)
+            * Projection::translate(-inner.x, -inner.y);
+        self.image_prep.prepare_image_warp(&mut self.eye_scratch_32, frame, &projection);
+        (tl, 1. / base_scale, inner, a)
+    }
+
+    fn extract_face<'a>(
+        &mut self, frame: &'a Rgb32FImage, face_index: usize,
+    ) -> (Vec2, SubImage<&'a Rgb32FImage>) {
+        let face = &self.pending_faces[face_index];
+        let (min, max) = face.landmarks.iter()
+            .copied()
+            .fold(None, |acc, (p, _)| {
+                if let Some((min, max)) = acc {
+                    Some((p.min(min), p.max(max)))
+                } else {
+                    Some((p, p))
+                }
+            })
+            .unwrap();
+        let half_size = (max - min) * 0.6;
+        let center = (min + max) * 0.5;
+
+        let min = center - half_size;
+        let max = center + half_size;
+
+        let size = uvec2(frame.width(), frame.height()).as_vec2();
+        let min_safe = min.clamp(Vec2::ZERO, size).as_uvec2();
+        let max_safe = max.clamp(Vec2::ZERO, size).as_uvec2();
+        let size_safe = max_safe - min_safe;
+
+        let face_frame = frame.view(min_safe.x, min_safe.y, size_safe.x, size_safe.y);
+        (min_safe.as_vec2(), face_frame)
+    }
+
+    fn process_eye(
+        &self,
+        results: &ArrayViewD<f32>,
+        index: usize,
+        offset: Vec2,
+        scale: Vec2,
+        inner: Vec2,
+        angle: f32,
+    ) -> PendingEye {
+        let t_c = results.slice(s![index, 0, .., ..]);
+        let (x, y, c) = t_c.indexed_iter()
+            .fold(None, |acc, ((y, x), &c)| {
+                if let Some((prev_x, prev_y, prev_c)) = acc {
+                    if c > prev_c {
+                        Some((x, y, c))
+                    } else {
+                        Some((prev_x, prev_y, prev_c))
+                    }
+                } else {
+                    Some((x, y, c))
+                }
+            })
+            .unwrap();
+
+        let x_off = results[[index, 2, y, x]];
+        let y_off = results[[index, 1, y, x]];
+        let x_off = 32. * logit(x_off, 8.);
+        let y_off = 32. * logit(y_off, 8.);
+        let x_eye = 4. * (x as f32) + x_off;
+        let y_eye = 4. * (y as f32) + y_off;
+
+        // Flip left eye
+        let x_eye = if index > 0 { 32. - x_eye } else { x_eye };
+
+        let rel = vec2(x_eye, y_eye);
+        let rotated = offset + scale * rel;
+        let position = rotate(inner, rotated, -angle);
+
+        PendingEye {
+            open: 1.,
+            position,
+            confidence: c,
+        }
+    }
+
+    fn detect_eyes(
+        &mut self, frame: &Rgb32FImage, face_index: usize,
+    ) -> Result<(PendingEye, PendingEye), ort::Error> {
         if self.config.no_gaze {
-            return (Vec4::X, Vec4::X);
+            return Ok((Default::default(), Default::default()));
         }
 
+        let landmarks = &self.pending_faces[face_index].landmarks;
+        let inner_r = landmarks[39].0;
+        let outer_r = landmarks[36].0;
+        let inner_l = landmarks[45].0;
+        let outer_l = landmarks[42].0;
 
+        let (pos_r, scale_r, ref_r, a_r) = self.prepare_eye(&frame, inner_r, outer_r, false);
+        self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 0).unwrap();
+        let (pos_l, scale_l, ref_l, a_l) = self.prepare_eye(&frame, inner_l, outer_l, true);
+        self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 32).unwrap();
 
-    }*/
+        // self.image_prep.save(&self.eyes_scratch_32, "eyes_scratch_32.exr").unwrap();
+
+        let input = self.eyes_scratch_32.as_view()
+            .insert_axis(Axis(0))
+            .into_shape_with_order((2, 32, 32, 3))
+            .unwrap()
+            .permuted_axes((0, 3, 1, 2));
+        let outputs = self.gaze_session.run(ort::inputs![input]?)?;
+        let results = outputs[0].try_extract_tensor::<f32>()?;
+
+        let eye_r = self.process_eye(&results, 0, pos_r, scale_r, ref_r, a_r);
+        let eye_l = self.process_eye(&results, 1, pos_l, scale_l, ref_l, a_l);
+        Ok((eye_r, eye_l))
+    }
+
+    fn detect_landmarks(
+        &mut self, frame: &Rgb32FImage, face_index: usize, bounds: Vec4, scale: Vec2,
+    ) -> Result<f32, ort::Error> {
+        let size = uvec2(frame.width(), frame.height()).as_vec2();
+        let min = bounds.xy().clamp(Vec2::ZERO, size).as_uvec2();
+        let max = (bounds.zw() + 1.).clamp(Vec2::ZERO, size).as_uvec2();
+        let crop_size = max - min;
+        let crop = frame.view(min.x, min.y, crop_size.x, crop_size.y);
+        self.image_prep.prepare_sub_image(&mut self.face_scratch_res, &crop);
+        // self.image_prep.save(&self.face_scratch_res, "face_scratch_res.exr").unwrap();
+        let input = self.face_scratch_res.as_view()
+            .insert_axis(Axis(0))
+            .permuted_axes((0, 3, 1, 2));
+        let outputs = self.session.run(ort::inputs![input]?)?;
+        let result = outputs[0]
+            .try_extract_tensor::<f32>()?;
+
+        let (c0, c1, c2) = match self.config.model_type {
+            TrackerModel::ModelT => (30usize, 60, 90),
+            _ => (66, 132, 198),
+        };
+
+        let res_1 = (self.res - 1) as f32;
+        let res_scale = res_1 / (self.out_res as f32);
+        let t_c = result.slice(s![0, 0..c0, .., ..]);
+        let t_y = result.slice(s![0, c0..c1, .., ..]);
+        let t_x = result.slice(s![0, c1..c2, .., ..]);
+
+        let mut total_c = 0.;
+        let face = &mut self.pending_faces[face_index];
+        face.landmarks.clear();
+
+        for index in 0..c0 {
+            let t_c = t_c.slice(s![index, .., ..]);
+            let (x, y, c) = t_c.indexed_iter()
+                .fold(None, |acc, ((y, x), &c)| {
+                    if let Some((prev_x, prev_y, prev_c)) = acc {
+                        if c > prev_c {
+                            Some((x, y, c))
+                        } else {
+                            Some((prev_x, prev_y, prev_c))
+                        }
+                    } else {
+                        Some((x, y, c))
+                    }
+                })
+                .unwrap();
+
+            let x_off = t_x[[index, y, x]];
+            let y_off = t_y[[index, y, x]];
+            let x_off = res_1 * logit(x_off, self.logit_factor);
+            let y_off = res_1 * logit(y_off, self.logit_factor);
+            let x_off = bounds.x + scale.x * (res_scale * (x as f32) + x_off);
+            let y_off = bounds.y + scale.y * (res_scale * (y as f32) + y_off);
+            let off = vec2(x_off, y_off);
+
+            if self.config.model_type == TrackerModel::ModelT {
+                unimplemented!();
+            }
+
+            total_c += c;
+            face.landmarks.push((off, c));
+        }
+
+        let avg_c = total_c / (face.landmarks.len() as f32);
+        Ok(avg_c)
+    }
 
     #[tracing::instrument(skip_all)]
-    pub fn detect(&mut self, frame: &RgbImage, now: f64) -> Result<(), ort::Error> {
+    pub fn detect(&mut self, frame: &Rgb32FImage, now: f64) -> Result<(), ort::Error> {
         let size = uvec2(frame.width(), frame.height());
 
         self.frame_count += 1;
@@ -295,7 +621,8 @@ impl Tracker {
             }
 
             if self.config.assume_fullscreen_face {
-                self.face_boxes.push(vec4(0., 0., self.config.size.x as f32, self.config.size.y as f32));
+                self.face_boxes.push((
+                    Vec2::ZERO, vec2(self.config.size.x as f32, self.config.size.y as f32)));
             }
 
             self.wait_count = 0;
@@ -318,8 +645,9 @@ impl Tracker {
         }
 
         let size_f = size.as_vec2() - Vec2::splat(1.);
-        for (index, b) in self.face_boxes.iter().enumerate() {
-            let [x, y, w, h] = b.to_array();
+        for (index, &(min, size)) in self.face_boxes.iter().enumerate() {
+            let [x, y] = min.to_array();
+            let [w, h] = size.to_array();
             let x1 = (x - (w * 0.1).floor()).clamp(0., size_f.x);
             let y1 = (y - (h * 0.125).floor()).clamp(0., size_f.y);
             let x2 = (x + w + (w * 0.1).floor()).clamp(0., size_f.x);
@@ -338,73 +666,115 @@ impl Tracker {
             self.crops.push((bounds, scale, expand));
         }
 
-        for (bounds, scale, expand) in self.crops.drain(..) {
-            // landmarks
-            resize_linear_rgb_area(frame, &mut self.face_scratch_res, bounds);
-            for pixel in self.face_scratch_res.pixels_mut() {
-                pixel.0 = (Vec3::from_array(pixel.0) * self.std - self.mean).to_array();
+        self.num_pending_faces = 0;
+        let mut crops = std::mem::take(&mut self.crops);
+        for (bounds, scale, expand) in crops.drain(..) {
+            if self.num_pending_faces >= self.pending_faces.len() {
+                break;
             }
 
-            let shape = (1, self.res as usize, self.res as usize, 3);
-            let input = ArrayView::from_shape(shape, self.face_scratch_res.as_raw())
-                .unwrap()
-                .permuted_axes((0, 3, 1, 2));
-
-            let outputs = self.session.run(ort::inputs![input]?)?;
-            let result = outputs[0]
-                .try_extract_tensor::<f32>()?;
-
-            let (c0, c1, c2) = match self.config.model_type {
-                TrackerModel::ModelT => (30usize, 60, 90),
-                _ => (66, 132, 198),
-            };
-
-            let res_scale = (((self.res - 1) as f32) / (self.out_res as f32));
-            let t_c = result.slice(s![0, 0..c0, .., ..]);
-            let t_x = result.slice(s![0, c0..c1, .., ..]);
-            let t_y = result.slice(s![0, c1..c2, .., ..]);
-
-            let mut total_c = 0.;
-            self.landmarks.clear();
-
-            for index in 0..c0 {
-                let t_c = t_c.slice(s![index, .., ..]);
-                let (x, y, c) = t_c.indexed_iter()
-                    .fold(None, |acc, ((x, y), &c)| {
-                        if let Some((prev_x, prev_y, prev_c)) = acc {
-                            if c > prev_c {
-                                Some((x, y, c))
-                            } else {
-                                Some((prev_x, prev_y, prev_c))
-                            }
-                        } else {
-                            Some((x, y, c))
-                        }
-                    })
-                    .unwrap();
-
-                let x_off = t_x[[index, x, y]];
-                let y_off = t_y[[index, x, y]];
-                let x_off = logit(x_off, self.logit_factor);
-                let y_off = logit(y_off, self.logit_factor);
-                let x_off = bounds.y + scale.y * (res_scale * (y as f32) + x_off);
-                let y_off = bounds.x + scale.x * (res_scale * (x as f32) + y_off);
-                let off = vec2(x_off, y_off);
-
-                if self.config.model_type == TrackerModel::ModelT {
-                    unimplemented!();
-                }
-
-                total_c += c;
-                self.landmarks.push((off, c));
-            }
-
-            let avg_c = total_c / (self.landmarks.len() as f32);
-            if avg_c <= self.config.threshold {
+            let index = self.num_pending_faces;
+            let c = self.detect_landmarks(frame, index, bounds, scale)? + expand;
+            if c < self.config.threshold {
                 continue;
             }
 
-            // get_eye_state
+            self.num_pending_faces += 1;
+            let (eye_r, eye_l) = self.detect_eyes(frame, index)?;
+
+            let face = &mut self.pending_faces[index];
+            face.disabled = false;
+            face.confidence = c;
+            face.eye_r = eye_r;
+            face.eye_l = eye_l;
+            face.update_bounds();
+        }
+        self.crops = crops;
+
+        self.pending_face_indices.clear();
+        self.pending_face_indices.extend(0..self.num_pending_faces);
+        self.pending_face_indices.sort_by(|&idx_a, &idx_b| {
+            let a = &self.pending_faces[idx_a];
+            let b = &self.pending_faces[idx_b];
+            b.confidence.total_cmp(&a.confidence)
+        });
+
+        for i in 1..self.num_pending_faces {
+            let face = &self.pending_faces[i];
+            let min = face.bounds_min;
+            let max = face.bounds_max;
+
+            if self.pending_faces.iter().any(|other| {
+                min.cmplt(other.bounds_max).all()
+                    && !max.cmpgt(other.bounds_min).any()
+            }) {
+                self.pending_faces[i].disabled = true;
+            }
+        }
+        self.pending_face_indices.retain(|&idx| !self.pending_faces[idx].disabled);
+
+        self.face_boxes.clear();
+        self.num_tracked_faces = 0;
+        while !self.pending_face_indices.is_empty()
+            && self.num_tracked_faces < self.tracked_faces.len() {
+
+            let tracked = &self.tracked_faces[self.num_tracked_faces..];
+            let mut best = None;
+
+            for (pending_idx, &face_index) in self.pending_face_indices.iter().enumerate() {
+                let pending = &self.pending_faces[face_index];
+
+                for (tracked_idx, face) in tracked.iter().enumerate() {
+                    let dist2 = if face.alive {
+                        (face.position - pending.centre).length_squared()
+                    } else {
+                        f32::MAX
+                    };
+                    if best.map_or(true, |(d2, _, _)| dist2 < d2) {
+                        best = Some((dist2, pending_idx, tracked_idx));
+                    }
+                }
+            }
+
+            let (_, pending_idx, tracked_idx) = best.unwrap();
+            let idx = self.pending_face_indices.swap_remove(pending_idx);
+
+            let pending = &mut self.pending_faces[idx];
+            let tracked = &mut self.tracked_faces[tracked_idx];
+
+            if tracked.alive {
+                tracked.frame_count += 1;
+            } else {
+                tracked.frame_count = 1;
+            }
+
+            tracked.alive = true;
+            tracked.position = pending.centre;
+            std::mem::swap(&mut tracked.landmarks, &mut pending.landmarks);
+
+            self.face_boxes.push((pending.bounds_min, pending.bounds_max - pending.bounds_min));
+
+            self.tracked_faces.swap(self.num_tracked_faces, tracked_idx);
+            self.num_tracked_faces += 1;
+        }
+
+        for face in &mut self.tracked_faces[self.num_tracked_faces..] {
+            face.alive = false;
+            face.frame_count = 0;
+        }
+
+        for face in &mut self.tracked_faces[..self.num_tracked_faces] {
+            face.update_contour(self.contour_indices);
+
+            if self.pnp.solve(&self.contour_3d, face.contour_2d(), None) {
+                let solution = &self.pnp.solutions()[0];
+                let t = solution.translation();
+                let rot = solution.rotation_matrix();
+                face.translation = t;
+                face.rotation = rot;
+            } else {
+                tracing::warn!("no PnP solution");
+            }
         }
 
         Ok(())

@@ -13,6 +13,7 @@ tracing-tracy = { version = "0.11.4", optional = true }
 crossbeam-channel = "0.5.14"
 ctrlc = "3.4.5"
 nokhwa = { version = "0.10.7", features = ["input-native", "output-threaded"] }
+image = "0.25.5"
 
 [features]
 tracing = ["dep:tracing-tracy"]

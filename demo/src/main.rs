@@ -1,5 +1,6 @@
 use std::time::Instant;
 use bevy::asset::RenderAssetUsages;
+use bevy::audio::AudioPlugin;
 use bevy::color::palettes::css::LIME;
 use bevy::log::Level;
 use bevy::math::{uvec2, vec2, vec3};
@@ -68,7 +69,8 @@ fn main() -> anyhow::Result<()> {
     let mut app = App::default();
     app
         .add_plugins((
-            DefaultPlugins,
+            DefaultPlugins.build()
+                .disable::<AudioPlugin>(),
             DefaultInspectorConfigPlugin,
             bevy_egui::EguiPlugin,
             inspector::plugin,
@@ -111,6 +113,7 @@ fn main_plugin(app: &mut App) {
         .add_systems(Update, (
             handle_new_camera_frames,
             draw_detections,
+            draw_landmarks,
         ));
 }
 
@@ -193,6 +196,7 @@ pub fn handle_new_camera_frames(
         let image = span!(Level::DEBUG, "decode")
             .in_scope(|| frame.decode_image::<RgbFormat>())
             .expect("camera frame should be decodable");
+        let image = image.convert();
         if let Err(err) = tracker.0.detect(&image, now64) {
             warn!("failed to track frame: {err}");
         }
@@ -223,11 +227,8 @@ pub fn draw_detections(
     };
 
     let color = LIME;
-    for bounds in tracker.0.face_boxes() {
-        let min = bounds.xy();
-        let size = bounds.zw();
+    for &(min, size) in tracker.0.face_boxes() {
         let max = min + size;
-
         let a = transform_point(vec2(min.x, min.y));
         let b = transform_point(vec2(max.x, min.y));
         let c = transform_point(vec2(max.x, max.y));
@@ -237,5 +238,31 @@ pub fn draw_detections(
         gizmos.line(b, c, color);
         gizmos.line(c, d, color);
         gizmos.line(d, a, color);
+    }
+}
+
+pub fn draw_landmarks(
+    mut gizmos: Gizmos,
+    camera_info: Res<CameraInfo>,
+    tracker: Res<ActiveTracker>,
+) {
+    let z = -4.9;
+    let point_scale = -4. / (camera_info.resolution.y as f32);
+    let point_offset = -camera_info.resolution.as_vec2() * 0.5 * point_scale;
+
+    let transform_point = move |pt: Vec2| {
+        ((pt * point_scale) + point_offset).extend(z)
+    };
+
+    for face in tracker.0.faces() {
+        for &(pos, c) in face.landmarks() {
+            let p = transform_point(pos);
+            let c = Color::hsv(c * 270., 1., 1.);
+            gizmos.sphere(p, 0.01, c);
+        }
+
+        let start = (vec3(0., 0., 0.) - face.translation()) * vec3(1. / 960., 1. / 540., 1.);
+        let end  = start + face.rotation() * Vec3::Z;
+        gizmos.arrow(start, end, Color::WHITE);
     }
 }

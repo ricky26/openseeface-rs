@@ -4,7 +4,8 @@ use clap::Parser;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::CallbackCamera;
-use tracing::{event, info, span, Level};
+use image::buffer::ConvertBuffer;
+use tracing::{info, span, Level};
 use tracing_subscriber::{EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -86,10 +87,11 @@ fn main() -> anyhow::Result<()> {
         let now64 = (now - epoch).as_secs_f64();
 
         let image = span!(Level::DEBUG, "decode").in_scope(|| frame.decode_image::<RgbFormat>())?;
+        let image = image.convert();
         tracker.detect(&image, now64)?;
 
         #[cfg(feature = "tracing")]
-        event!(Level::DEBUG, message = "frame end", tracy.frame_mark = true);
+        tracing::event!(Level::DEBUG, message = "frame end", tracy.frame_mark = true);
     }
 
     camera.stop_stream()?;

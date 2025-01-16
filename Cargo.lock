@@ -3328,7 +3328,7 @@ dependencies = [
  "getrandom",
  "image",
  "itertools 0.12.1",
- "nalgebra",
+ "nalgebra 0.32.6",
  "num",
  "rand",
  "rand_distr",
@@ -3879,7 +3879,24 @@ dependencies = [
  "num-complex",
  "num-rational",
  "num-traits",
- "simba",
+ "simba 0.8.1",
+ "typenum",
+]
+
+[[package]]
+name = "nalgebra"
+version = "0.33.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26aecdf64b707efd1310e3544d709c5c0ac61c13756046aaaba41be5c4f66a3b"
+dependencies = [
+ "approx",
+ "glam",
+ "matrixmultiply",
+ "nalgebra-macros",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "simba 0.9.0",
  "typenum",
 ]
 
@@ -4506,6 +4523,7 @@ dependencies = [
  "glam",
  "image",
  "imageproc",
+ "nalgebra 0.33.2",
  "ndarray",
  "nokhwa",
  "nokhwa-bindings-linux",
@@ -4540,6 +4558,7 @@ dependencies = [
  "clap",
  "crossbeam-channel",
  "ctrlc",
+ "image",
  "nokhwa",
  "openseeface",
  "tracing",
@@ -5468,6 +5487,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "simba"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3a386a501cd104797982c15ae17aafe8b9261315b5d07e3ec803f2ea26be0fa"
+dependencies = [
+ "approx",
+ "num-complex",
+ "num-traits",
+ "paste",
+ "wide",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5494,7 +5526,7 @@ dependencies = [
  "geo",
  "itertools 0.10.5",
  "log",
- "nalgebra",
+ "nalgebra 0.32.6",
  "num_cpus",
  "once_cell",
  "pathfinding",
