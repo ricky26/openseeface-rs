@@ -1,7 +1,7 @@
 use std::time::Instant;
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
-use bevy::color::palettes::css::LIME;
+use bevy::color::palettes::css::{LIME, YELLOW};
 use bevy::log::Level;
 use bevy::math::{uvec2, vec2, vec3};
 use bevy::prelude::*;
@@ -15,7 +15,7 @@ use image::RgbaImage;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{Buffer, CallbackCamera};
-
+use openseeface::face::DEFAULT_FACE;
 use openseeface::tracker::{Tracker, TrackerConfig};
 
 pub mod inspector;
@@ -261,8 +261,18 @@ pub fn draw_landmarks(
             gizmos.sphere(p, 0.01, c);
         }
 
-        let start = (vec3(0., 0., 0.) - face.translation()) * vec3(1. / 960., 1. / 540., 1.);
-        let end  = start + face.rotation() * Vec3::Z;
-        gizmos.arrow(start, end, Color::WHITE);
+        if face.has_pose() {
+            let r = face.rotation();
+            let t = face.translation();
+
+            for &p in &DEFAULT_FACE {
+                let p = r * p + t;
+                gizmos.sphere(p, 0.01, YELLOW);
+            }
+
+            // let start = (vec3(0., 0., 0.) - face.translation()) * vec3(1. / 960., 1. / 540., 1.);
+            // let end = start + face.rotation() * Vec3::Z;
+            // gizmos.arrow(start, end, Color::WHITE);
+        }
     }
 }

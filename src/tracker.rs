@@ -751,8 +751,24 @@ impl Tracker {
             tracked.alive = true;
             tracked.position = pending.centre;
             std::mem::swap(&mut tracked.landmarks, &mut pending.landmarks);
+            pending.landmarks.clear();
+
+            tracked.update_landmarks_camera(frame.width(), frame.height());
 
             self.face_boxes.push((pending.bounds_min, pending.bounds_max - pending.bounds_min));
+
+            tracked.update_contour(self.contour_indices);
+
+            if self.pnp.solve(&self.contour_3d, tracked.contour_2d(), None) {
+                let solution = self.pnp.best_solution().unwrap();
+                let t = solution.translation();
+                let rot = solution.rotation_matrix();
+                tracked.pnp = true;
+                tracked.translation = t;
+                tracked.rotation = rot;
+            } else {
+                tracked.pnp = false;
+            }
 
             self.tracked_faces.swap(self.num_tracked_faces, tracked_idx);
             self.num_tracked_faces += 1;
@@ -761,20 +777,6 @@ impl Tracker {
         for face in &mut self.tracked_faces[self.num_tracked_faces..] {
             face.alive = false;
             face.frame_count = 0;
-        }
-
-        for face in &mut self.tracked_faces[..self.num_tracked_faces] {
-            face.update_contour(self.contour_indices);
-
-            if self.pnp.solve(&self.contour_3d, face.contour_2d(), None) {
-                let solution = &self.pnp.solutions()[0];
-                let t = solution.translation();
-                let rot = solution.rotation_matrix();
-                face.translation = t;
-                face.rotation = rot;
-            } else {
-                tracing::warn!("no PnP solution");
-            }
         }
 
         Ok(())

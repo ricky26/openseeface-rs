@@ -468,9 +468,11 @@ impl FeatureExtractor {
 pub struct TrackedFace {
     pub(crate) id: usize,
     pub(crate) alive: bool,
+    pub(crate) pnp: bool,
     pub(crate) frame_count: usize,
     pub(crate) position: Vec2,
     pub(crate) landmarks: Vec<(Vec2, f32)>,
+    pub(crate) landmarks_camera: Vec<Vec2>,
     pub(crate) face_3d: [Vec3; 70],
     pub(crate) contour_2d: Vec<Vec2>,
     pub(crate) translation: Vec3,
@@ -498,6 +500,10 @@ impl TrackedFace {
         &self.contour_2d
     }
 
+    pub fn has_pose(&self) -> bool {
+        self.pnp
+    }
+
     pub fn translation(&self) -> Vec3 {
         self.translation
     }
@@ -512,9 +518,11 @@ impl TrackedFace {
         TrackedFace {
             id,
             alive: false,
+            pnp: false,
             position: Vec2::ZERO,
             frame_count: 0,
             landmarks: Vec::with_capacity(70),
+            landmarks_camera: Vec::with_capacity(70),
             face_3d,
             contour_2d: Vec::new(),
             translation: Vec3::ZERO,
@@ -525,10 +533,19 @@ impl TrackedFace {
     pub(crate) fn update_contour(&mut self, indices: &[usize]) {
         self.contour_2d.clear();
         self.contour_2d.extend(indices.iter()
-            .map(|&idx| self.landmarks[idx].0));
+            .map(|&idx| self.landmarks_camera[idx]));
     }
 
-    pub fn reset(&mut self) {
+    pub(crate) fn update_landmarks_camera(&mut self, width: u32, height: u32) {
+        let size = width.min(height) as f32;
+        let scale = 2. / size;
+        self.landmarks_camera.clear();
+        self.landmarks_camera.extend(
+            self.landmarks.iter().map(|&(p, _)| p * scale - 0.5));
+    }
+
+    pub(crate) fn reset(&mut self) {
         self.alive = false;
+        self.pnp = false;
     }
 }

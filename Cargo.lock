@@ -4528,6 +4528,7 @@ dependencies = [
  "nokhwa",
  "nokhwa-bindings-linux",
  "ort",
+ "rand",
  "remedian",
  "serde",
  "serde_json",

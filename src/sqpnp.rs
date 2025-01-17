@@ -5,32 +5,34 @@
 use std::marker::PhantomData;
 
 use glam::{Mat3, Vec2, Vec3};
-use nalgebra::{Const, Matrix, Matrix3, SMatrix, SVector, Vector2, Vector3};
+use nalgebra::{convert, Const, Matrix, Matrix3, SMatrix, SVector, Vector2, Vector3};
 
-type NVec2 = Vector2<f32>;
-type NVec3 = Vector3<f32>;
-type NVec6 = SVector<f32, 6>;
-pub type NVec9 = SVector<f32, 9>;
-pub type NMat3 = Matrix3<f32>;
-pub type NMat9 = SMatrix<f32, 9, 9>;
-type NMat3x9 = SMatrix<f32, 3, 9>;
-type NMat6 = SMatrix<f32, 6, 6>;
-type NMat9x3 = SMatrix<f32, 9, 3>;
-type NMat9x6 = SMatrix<f32, 9, 6>;
+type Float = f64;
+type NVec2 = Vector2<Float>;
+type NVec3 = Vector3<Float>;
+type NVec6 = SVector<Float, 6>;
+pub type NVec9 = SVector<Float, 9>;
+pub type NMat3 = Matrix3<Float>;
+pub type NMat9 = SMatrix<Float, 9, 9>;
+type NMat3x9 = SMatrix<Float, 3, 9>;
+type NMat6 = SMatrix<Float, 6, 6>;
+type NMat9x3 = SMatrix<Float, 9, 3>;
+type NMat9x6 = SMatrix<Float, 9, 6>;
 
 fn vec9_to_mat3(v: &NVec9) -> NMat3 {
-    v.reshape_generic(Const::<3>, Const::<3>)
+    v.reshape_generic(Const::<3>, Const::<3>).transpose()
 }
 
 fn mat3_to_vec9(v: &NMat3) -> NVec9 {
-    v.reshape_generic(Const::<9>, Const::<1>)
+    let t = v.transpose();
+    t.reshape_generic(Const::<9>, Const::<1>)
 }
 
-const SQRT3: f32 = 1.73205080757;
+const SQRT3: Float = 1.73205080757;
 
 // Solve `A*x=b` for 3x3 SPD `a`.
 fn axb_solve_ldlt_3x3(a: &NMat3, b: &NVec3) -> Option<NVec3> {
-    const EPSILON: f32 = 1e-10;
+    const EPSILON: Float = 1e-10;
 
     let mut l = NMat3::zeros();
 
@@ -67,7 +69,7 @@ fn axb_solve_ldlt_3x3(a: &NMat3, b: &NVec3) -> Option<NVec3> {
     Some(NVec3::new(x, y, z))
 }
 
-fn orthogonality_error(x: &NMat3) -> f32 {
+fn orthogonality_error(x: &NMat3) -> Float {
     let a: NVec3 = x.column(0).into();
     let b: NVec3 = x.column(1).into();
     let c: NVec3 = x.column(2).into();
@@ -91,30 +93,31 @@ pub struct SqPnPSolution {
     rotation: NVec9,
     translation: NVec3,
     num_iterations: usize,
-    sq_error: f32,
+    sq_error: Float,
 }
 
 impl SqPnPSolution {
     pub fn rotation_matrix(&self) -> Mat3 {
-        let mat: Mat3 = self.rotation
-            .reshape_generic(Const::<3>, Const::<3>)
-            .into();
-        mat.transpose()
+        let mat = vec9_to_mat3(&self.rotation);
+        let mat: SMatrix<f32, 3, 3> = convert(mat);
+        let mat: Mat3 = mat.into();
+        mat
     }
 
     pub fn translation(&self) -> Vec3 {
-        self.translation.into()
+        let t: SVector<f32, 3> = convert(self.translation);
+        t.into()
     }
 
     pub fn num_iterations(&self) -> usize {
         self.num_iterations
     }
 
-    pub fn sq_error(&self) -> f32 {
+    pub fn sq_error(&self) -> Float {
         self.sq_error
     }
 
-    fn fast_transform_z(&self, p: NVec3) -> f32 {
+    fn fast_transform_z(&self, p: NVec3) -> Float {
         let r = &self.rotation;
         let t = &self.translation;
         r[6] * p.x + r[7] * p.y * r[8] * p.z + t.z
@@ -132,7 +135,8 @@ impl SqPnPSolution {
                     if w <= 0.0 {
                         (pos, neg)
                     } else {
-                        let z = self.fast_transform_z(p.into());
+                        let p: SVector<f32, 3> = p.into();
+                        let z = self.fast_transform_z(convert(p));
                         if z > 0. {
                             (pos + 1, neg)
                         } else {
@@ -143,7 +147,8 @@ impl SqPnPSolution {
         } else {
             points.iter()
                 .fold((0, 0), |(pos, neg), &p| {
-                    let z = self.fast_transform_z(p.into());
+                    let p: SVector<f32, 3> = p.into();
+                    let z = self.fast_transform_z(convert(p));
                     if z > 0. {
                         (pos + 1, neg)
                     } else {
@@ -157,14 +162,14 @@ impl SqPnPSolution {
 }
 
 pub trait SqPnPParameters {
-    const RANK_TOLERANCE: f32;
-    const SQP_SQUARED_TOLERANCE: f32;
-    const SQP_DET_THRESHOLD: f32;
+    const RANK_TOLERANCE: Float;
+    const SQP_SQUARED_TOLERANCE: Float;
+    const SQP_DET_THRESHOLD: Float;
     const SQP_MAX_ITERATIONS: usize;
-    const ORTHOGONALITY_SQUARED_ERROR_THRESHOLD: f32;
-    const EQUAL_VECTORS_SQUARED_DIFF: f32;
-    const EQUAL_SQUARED_ERRORS_DIFF: f32;
-    const POINT_VARIANCE_THRESHOLD: f32;
+    const ORTHOGONALITY_SQUARED_ERROR_THRESHOLD: Float;
+    const EQUAL_VECTORS_SQUARED_DIFF: Float;
+    const EQUAL_SQUARED_ERRORS_DIFF: Float;
+    const POINT_VARIANCE_THRESHOLD: Float;
 
     fn nearest_rotation_matrix(m: &NMat3) -> NMat3;
     fn eigen_vectors(m: &NMat9) -> (NMat9, NVec9);
@@ -186,11 +191,21 @@ pub fn nearest_rotation_matrix_foam(m: &NMat3) -> NMat3 {
         return nearest_rotation_matrix_svd(m);
     }
 
-    let n = m.adjoint();
+    let n = NMat3::new(
+        m[4] * m[8] - m[5] * m[7],
+        m[2] * m[7] - m[1] * m[8],
+        m[1] * m[5] - m[2] * m[4],
+        m[5] * m[6] - m[3] * m[8],
+        m[0] * m[8] - m[2] * m[6],
+        m[2] * m[3] - m[0] * m[5],
+        m[3] * m[7] - m[4] * m[6],
+        m[1] * m[6] - m[0] * m[7],
+        m[0] * m[4] - m[1] * m[3],
+    );
     let lm = m.magnitude_squared();
     let ln = n.magnitude_squared();
 
-    let mut l = 1.5 + 0.5 * lm;
+    let mut l = 0.5 * (lm + 3.);
     if det < 0. {
         l = -l;
     }
@@ -218,7 +233,7 @@ pub fn nearest_rotation_matrix_foam(m: &NMat3) -> NMat3 {
 }
 
 pub fn eigen_vectors_rrqr(m: &NMat9) -> (NMat9, NVec9) {
-    let qr = m.qr();
+    let qr = m.col_piv_qr();
     let q = qr.q();
     let r = qr.unpack_r().diagonal().abs();
     (q, r)
@@ -235,23 +250,21 @@ pub fn eigen_vectors_svd(m: &NMat9) -> (NMat9, NVec9) {
 pub struct DefaultSqPnPParameters;
 
 impl SqPnPParameters for DefaultSqPnPParameters {
-    const RANK_TOLERANCE: f32 = 1e-7;
-    const SQP_SQUARED_TOLERANCE: f32 = 1e-10;
-    const SQP_DET_THRESHOLD: f32 = 1.01;
+    const RANK_TOLERANCE: Float = 1e-7;
+    const SQP_SQUARED_TOLERANCE: Float = 1e-10;
+    const SQP_DET_THRESHOLD: Float = 1.01;
     const SQP_MAX_ITERATIONS: usize = 15;
-    const ORTHOGONALITY_SQUARED_ERROR_THRESHOLD: f32 = 1e-8;
-    const EQUAL_VECTORS_SQUARED_DIFF: f32 = 1e-10;
-    const EQUAL_SQUARED_ERRORS_DIFF: f32 = 1e-6;
-    const POINT_VARIANCE_THRESHOLD: f32 = 1e-5;
+    const ORTHOGONALITY_SQUARED_ERROR_THRESHOLD: Float = 1e-8;
+    const EQUAL_VECTORS_SQUARED_DIFF: Float = 1e-10;
+    const EQUAL_SQUARED_ERRORS_DIFF: Float = 1e-6;
+    const POINT_VARIANCE_THRESHOLD: Float = 1e-5;
 
     fn nearest_rotation_matrix(m: &NMat3) -> NMat3 {
-        // nearest_rotation_matrix_noam(m)
-        nearest_rotation_matrix_svd(m)
+        nearest_rotation_matrix_foam(m)
     }
 
     fn eigen_vectors(m: &NMat9) -> (NMat9, NVec9) {
-        // eigen_vectors_rrqr(m)
-        eigen_vectors_svd(m)
+        eigen_vectors_rrqr(m)
     }
 }
 
@@ -275,6 +288,21 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
         &self.solutions
     }
 
+    pub fn best_solution(&self) -> Option<&SqPnPSolution> {
+        self.solutions.iter()
+            .fold(None, |best, next| {
+                if let Some(best) = best {
+                    if next.sq_error < best.sq_error {
+                        Some(next)
+                    } else {
+                        Some(best)
+                    }
+                } else {
+                    Some(next)
+                }
+            })
+    }
+
     pub fn new() -> SqPnPSolver<P> {
         SqPnPSolver::default()
     }
@@ -286,12 +314,12 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
     fn handle_solution(
         &mut self,
         mut solution: SqPnPSolution,
-        mut min_sq_err: f32,
+        mut min_sq_err: Float,
         points: &[Vec3],
         weights: Option<&[f32]>,
         mean: NVec3,
         omega: &NMat9,
-    ) -> f32 {
+    ) -> Float {
         if !solution.has_positive_depth(mean)
             && !solution.has_positive_majority_depths(points, weights) {
             return min_sq_err;
@@ -322,8 +350,9 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
 
             if existing.sq_error > new_sq_err {
                 *existing = solution;
-                return min_sq_err;
             }
+
+            return min_sq_err;
         }
 
         self.solutions.push(solution);
@@ -333,7 +362,7 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
     fn row_and_null_space(
         r: &NVec9,
     ) -> (NMat9x6, NMat9x3, NMat6) {
-        const NORM_THRESHOLD: f32 = 0.1;
+        const NORM_THRESHOLD: Float = 0.1;
 
         let mut h = NMat9x6::zeros();
         let mut k = NMat6::zeros();
@@ -382,15 +411,15 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
         h[(3, 3)] = q5[0];
         h[(4, 3)] = q5[1];
         h[(5, 3)] = q5[2];
-        k[(3, 0)] = b.dot(&q1);
-        k[(3, 1)] = a.dot(&q2);
+        k[(3, 0)] = db1;
+        k[(3, 1)] = da2;
         k[(3, 3)] = b.dot(&q4) + a.dot(&q5);
 
         let dc2 = c.dot(&q2);
         let db3 = b.dot(&q3);
-        let dc4 = c.dot(&q4);
-        let q6 = -dc4 * q4;
-        let q7 = c - dc2 * q2 - dc4 * q5;
+        let dc5 = c.dot(&q5);
+        let q6 = -dc5 * q4;
+        let q7 = c - dc2 * q2 - dc5 * q5;
         let q8 = b - db3 * q3;
         let il8 = (q6.magnitude_squared() + q7.magnitude_squared() + q8.magnitude_squared())
             .sqrt()
@@ -575,7 +604,7 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
 
     fn run_sqp(r0: &NVec9, omega: &NMat9) -> SqPnPSolution {
         let mut r = *r0;
-        let mut delta_len_sq = f32::MAX;
+        let mut delta_len_sq = Float::MAX;
         let mut step = 0;
 
         while delta_len_sq > P::SQP_SQUARED_TOLERANCE && step < P::SQP_MAX_ITERATIONS {
@@ -618,9 +647,9 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
         let mut sum_w_proj_len_sq = 0.;
         let mut sum_w_p = NVec3::zeros();
         for (index, (&p3d, &p2d)) in points_3d.iter().zip(points_2d).enumerate() {
-            let p3d = NVec3::from(p3d);
-            let p2d = NVec2::from(p2d);
-            let w = weights.map_or(1., |pts| pts[index]);
+            let p3d: NVec3 = convert(SVector::<f32, 3>::from(p3d));
+            let p2d: NVec2 = convert(SVector::<f32, 2>::from(p2d));
+            let w = weights.map_or(1., |pts| pts[index]) as Float;
             let wp3d = w * p3d;
             let wp2d = w * p2d;
             let len_sq = p2d.magnitude_squared();
@@ -782,10 +811,10 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
             return false;
         }
 
-        let mut min_sq_error = f32::MAX;
+        let mut min_sq_error = Float::MAX;
         let num_eigen_points = num_null_vectors.max(1);
 
-        for i in 0..(9 - num_eigen_points) {
+        for i in (9 - num_eigen_points)..9 {
             let e = SQRT3 * eigen_vectors.column(i);
             let e_mat = vec9_to_mat3(&e);
             let o_err = orthogonality_error(&e_mat);
@@ -845,8 +874,10 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
 
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::PI;
     use super::*;
-    use glam::{vec3, EulerRot, Quat};
+    use glam::{vec2, vec3, EulerRot, Quat};
+    use rand::Rng;
 
     #[test]
     fn test_example_solution() {
@@ -862,7 +893,6 @@ mod tests {
         ];
 
         let (rx, ry, rz) = (30.0f32, 40.0f32, 50.0f32);
-        // let (rx, ry, rz) = (0f32, 0f32, 0f32);
         let (rx, ry, rz) = (rx.to_radians(), ry.to_radians(), rz.to_radians());
         let r = Quat::from_euler(EulerRot::XYZ, rx, ry, rz);
         let r = Mat3::from_quat(r);
@@ -870,7 +900,6 @@ mod tests {
         let hy = r.y_axis.length();
         let hz = r.z_axis.length();
         let t = vec3(10., 20., 10.);
-        // let t = vec3(0., 0., 0.);
 
         let p3d_t = p3d.map(|p| (r * p) + t);
         let p2d = p3d_t.map(|p| p.truncate() / p.z);
@@ -878,7 +907,7 @@ mod tests {
         let mut solver = SqPnPSolver::<DefaultSqPnPParameters>::new();
         assert!(solver.solve(&p3d, &p2d, None));
 
-        let solution = &solver.solutions()[0];
+        let solution = solver.best_solution().unwrap();
         let s_r = solution.rotation_matrix();
         let (rx, ry, rz) = s_r.to_euler(EulerRot::XYZ);
         let (rx, ry, rz) = (rx.to_degrees(), ry.to_degrees(), rz.to_degrees());
@@ -902,14 +931,183 @@ mod tests {
         println!("r={rx},{ry},{rz}");
         println!("s_t={s_t}");
 
+        let mut max_d2 = f32::MIN;
         for (index, (&m, &a)) in p3d.iter().zip(&p3d_t).enumerate() {
             let b = s_t + s_r * m;
             let delta = b - a;
             let d2 = delta.length_squared();
+            max_d2 = d2.max(max_d2);
 
             if d2 > 0.5 {
                 assert!(false, "point {index} too far, expected {a} got {b} (t={s_t} r={rx},{ry},{rz} ({r}))");
             }
         }
+
+        println!("max distance error: {}", max_d2.sqrt());
+    }
+
+    #[test]
+    fn test_tracker_example() {
+        let p3d = [
+            vec3(0.45517698, 0.30089578, -0.76442945),
+            vec3(0.44899884, 0.16699584, -0.765143),
+            vec3(0.0, -0.621079, -0.28729478),
+            vec3(-0.44899884, 0.16699584, -0.765143),
+            vec3(-0.45517698, 0.30089578, -0.76442945),
+            vec3(0.0, 0.2933326, -0.1375821),
+            vec3(0.0, 0.1948287, -0.06915811),
+            vec3(0.0, 0.10384402, -0.00915182),
+            vec3(0.0, 0.0, 0.0),
+            vec3(0.08062635, -0.041276067, -0.13416104),
+            vec3(0.046439346, -0.057675224, -0.10299063),
+            vec3(0.0, -0.06875312, -0.09054535),
+            vec3(-0.046439346, -0.057675224, -0.10299063),
+            vec3(-0.08062635, -0.041276067, -0.13416104),
+        ];
+        let p2d = [
+            vec2(886.7736, 691.49854),
+            vec2(895.48804, 736.1654),
+            vec2(1077.5038, 935.28107),
+            vec2(1181.6284, 717.183),
+            vec2(1183.4194, 671.3874),
+            vec2(1068.2501, 657.8319),
+            vec2(1072.8641, 683.7876),
+            vec2(1076.737, 710.0767),
+            vec2(1078.344, 734.45325),
+            vec2(1049.8451, 759.47864),
+            vec2(1061.2915, 760.7007),
+            vec2(1075.4752, 762.6959),
+            vec2(1087.6703, 760.0459),
+            vec2(1096.7527, 757.9353),
+        ];
+        let p2d = p2d.map(|p| (p / 540.) - 0.5);
+
+        for &p in &p3d {
+            println!("v {} {} {}", p.x, p.y, p.z);
+        }
+        for &p in &p2d {
+            println!("v {} {} 0.0", p.x * 0.001, p.y * 0.001);
+        }
+
+        let mut solver = SqPnPSolver::<DefaultSqPnPParameters>::new();
+        assert!(solver.solve(&p3d, &p2d, None));
+
+        let solution = solver.best_solution().unwrap();
+        let r = solution.rotation_matrix();
+        let t = solution.translation();
+
+        for &p in &p3d {
+            let p = r * p + t * 0.01;
+            println!("v {} {} {}", p.x, p.y, p.z);
+        }
+
+        println!("solution: {solution:?}");
+
+        let l0 = r.x_axis.length();
+        let l1 = r.y_axis.length();
+        let l2 = r.z_axis.length();
+        let l3 = r.row(0).length();
+        let l4 = r.row(1).length();
+        let l5 = r.row(2).length();
+
+        let d0 = (l0 - 1.).abs();
+        let d1 = (l1 - 1.).abs();
+        let d2 = (l2 - 1.).abs();
+        let d3 = (l3 - 1.).abs();
+        let d4 = (l4 - 1.).abs();
+        let d5 = (l5 - 1.).abs();
+
+        assert!(d0 < 0.1, "x axis not a unit {l0}");
+        assert!(d1 < 0.1, "y axis not a unit {l1}");
+        assert!(d2 < 0.1, "z axis not a unit {l2}");
+        assert!(d3 < 0.1, "x output not a unit {l3}");
+        assert!(d4 < 0.1, "y output not a unit {l4}");
+        assert!(d5 < 0.1, "z output not a unit {l5}");
+    }
+
+    #[test]
+    fn test_random() {
+        let mut rng = rand::thread_rng();
+
+        let mut p3d = Vec::with_capacity(1024);
+        let mut p2d = Vec::with_capacity(p3d.capacity());
+
+        let true_r_axis = vec3(
+            rng.gen_range(-1.0..=1.0),
+            rng.gen_range(-1.0..=1.0),
+            rng.gen_range(-1.0..=1.0),
+        ).normalize_or_zero();
+        let true_r_angle = rng.gen_range(0.0..(2. * PI));
+        let true_r = Quat::from_axis_angle(true_r_axis, true_r_angle);
+        let true_t = vec3(
+            rng.gen_range(-1.0..1.0),
+            rng.gen_range(-1.0..1.0),
+            rng.gen_range(1.5..3.0),
+        );
+
+        for _ in 0..64 {
+            let p3 = vec3(
+                rng.gen_range(-1.0..1.0),
+                rng.gen_range(-1.0..1.0),
+                rng.gen_range(-1.0..1.0),
+            );
+            let pt = true_r * p3 + true_t;
+            let p2 = pt.truncate() / pt.z;
+            p3d.push(p3);
+            p2d.push(p2);
+        }
+
+        for &p in &p3d {
+            println!("v {} {} {}", p.x, p.y, p.z);
+        }
+        for &p in &p2d {
+            println!("v {} {} 0.0", p.x * 0.001, p.y * 0.001);
+        }
+
+        let mut solver = SqPnPSolver::<DefaultSqPnPParameters>::new();
+        assert!(solver.solve(&p3d, &p2d, None));
+
+        let solution = solver.best_solution().unwrap();
+        let r = solution.rotation_matrix();
+        let t = solution.translation();
+
+        for &p in &p3d {
+            let p = r * p + t * 0.01;
+            println!("v {} {} {}", p.x, p.y, p.z);
+        }
+
+        println!("solution: {solution:?}");
+
+        let l0 = r.x_axis.length();
+        let l1 = r.y_axis.length();
+        let l2 = r.z_axis.length();
+        let l3 = r.row(0).length();
+        let l4 = r.row(1).length();
+        let l5 = r.row(2).length();
+
+        let d0 = (l0 - 1.).abs();
+        let d1 = (l1 - 1.).abs();
+        let d2 = (l2 - 1.).abs();
+        let d3 = (l3 - 1.).abs();
+        let d4 = (l4 - 1.).abs();
+        let d5 = (l5 - 1.).abs();
+
+        assert!(d0 < 0.1, "x axis not a unit {l0}");
+        assert!(d1 < 0.1, "y axis not a unit {l1}");
+        assert!(d2 < 0.1, "z axis not a unit {l2}");
+        assert!(d3 < 0.1, "x output not a unit {l3}");
+        assert!(d4 < 0.1, "y output not a unit {l4}");
+        assert!(d5 < 0.1, "z output not a unit {l5}");
+
+        let mut max_d2 = f32::MIN;
+        for &p in &p3d {
+            let true_p = true_r * p + true_t;
+            let solution_p = r * p + t;
+            let delta = solution_p - true_p;
+            let d2 = delta.length_squared();
+            max_d2 = d2.max(max_d2);
+        }
+
+        println!("max distance error: {}", max_d2.sqrt());
     }
 }
