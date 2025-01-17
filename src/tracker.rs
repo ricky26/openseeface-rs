@@ -170,17 +170,8 @@ impl Default for TrackerConfig {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct PendingEye {
-    pub open: f32,
-    pub position: Vec2,
-    pub confidence: f32,
-}
-
-#[derive(Clone, Debug, Default)]
 pub struct PendingFace {
     pub landmarks: Vec<(Vec2, f32)>,
-    pub eye_r: PendingEye,
-    pub eye_l: PendingEye,
     pub disabled: bool,
     pub confidence: f32,
     pub centre: Vec2,
@@ -465,7 +456,7 @@ impl Tracker {
         scale: Vec2,
         inner: Vec2,
         angle: f32,
-    ) -> PendingEye {
+    ) -> (Vec2, f32) {
         let t_c = results.slice(s![index, 0, .., ..]);
         let (x, y, c) = t_c.indexed_iter()
             .fold(None, |acc, ((y, x), &c)| {
@@ -495,16 +486,12 @@ impl Tracker {
         let rotated = offset + scale * rel;
         let position = rotate(inner, rotated, -angle);
 
-        PendingEye {
-            open: 1.,
-            position,
-            confidence: c,
-        }
+        (position, c)
     }
 
     fn detect_eyes(
         &mut self, frame: &Rgb32FImage, face_index: usize,
-    ) -> Result<(PendingEye, PendingEye), ort::Error> {
+    ) -> Result<((Vec2, f32), (Vec2, f32)), ort::Error> {
         if self.config.no_gaze {
             return Ok((Default::default(), Default::default()));
         }
@@ -685,8 +672,8 @@ impl Tracker {
             let face = &mut self.pending_faces[index];
             face.disabled = false;
             face.confidence = c;
-            face.eye_r = eye_r;
-            face.eye_l = eye_l;
+            face.landmarks.push(eye_r);
+            face.landmarks.push(eye_l);
             face.update_bounds();
         }
         self.crops = crops;

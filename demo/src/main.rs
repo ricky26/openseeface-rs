@@ -248,27 +248,13 @@ pub fn draw_detections(
 
 pub fn draw_landmarks(
     mut gizmos: Gizmos,
-    camera_info: Res<CameraInfo>,
     tracker: Res<ActiveTracker>,
 ) {
-    let z = -4.9;
-    let point_scale = -4. / (camera_info.resolution.y as f32);
-    let point_offset = -camera_info.resolution.as_vec2() * 0.5 * point_scale;
-
-    let transform_point = move |pt: Vec2| {
-        ((pt * point_scale) + point_offset).extend(z)
-    };
-
     for face in tracker.0.faces() {
-        for &(pos, c) in face.landmarks() {
-            let p = transform_point(pos);
+        for (&(_, c), &p) in face.landmarks().iter().zip(face.landmarks_camera()) {
+            let p = p.extend(-1.) * vec3(-0.4, 0.4, 1.) * 4.9;
             let c = Color::hsv(c * 270., 1., 1.);
             gizmos.sphere(p, 0.01, c);
-        }
-
-        for &p in face.landmarks_camera() {
-            let p = p.extend(-1.) * vec3(-0.4, 0.4, 1.);
-            gizmos.sphere(p, 0.01, Color::BLACK);
         }
 
         if face.has_pose() {
