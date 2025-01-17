@@ -260,7 +260,10 @@ impl SqPnPParameters for DefaultSqPnPParameters {
     const POINT_VARIANCE_THRESHOLD: Float = 1e-5;
 
     fn nearest_rotation_matrix(m: &NMat3) -> NMat3 {
-        nearest_rotation_matrix_foam(m)
+        // NOTE: The default method in the C++ implementation is FOAM, but the
+        // accuracy is sufficiently reduced that the SVD method is being used
+        // here.
+        nearest_rotation_matrix_svd(m)
     }
 
     fn eigen_vectors(m: &NMat9) -> (NMat9, NVec9) {
@@ -965,30 +968,27 @@ mod tests {
             vec3(-0.08062635, -0.041276067, -0.13416104),
         ];
         let p2d = [
-            vec2(886.7736, 691.49854),
-            vec2(895.48804, 736.1654),
-            vec2(1077.5038, 935.28107),
-            vec2(1181.6284, 717.183),
-            vec2(1183.4194, 671.3874),
-            vec2(1068.2501, 657.8319),
-            vec2(1072.8641, 683.7876),
-            vec2(1076.737, 710.0767),
-            vec2(1078.344, 734.45325),
-            vec2(1049.8451, 759.47864),
-            vec2(1061.2915, 760.7007),
-            vec2(1075.4752, 762.6959),
-            vec2(1087.6703, 760.0459),
-            vec2(1096.7527, 757.9353),
+            vec2(-0.23391902, -0.32876158),
+            vec2(-0.20859385, -0.4035709),
+            vec2(0.22709382, -0.7044395),
+            vec2(0.26521933, -0.24248922),
+            vec2(0.25173676, -0.16418946),
+            vec2(0.14646494, -0.22090518),
+            vec2(0.17472148, -0.2717712),
+            vec2(0.20328474, -0.32179987),
+            vec2(0.21496463, -0.3650577),
+            vec2(0.15130162, -0.412915),
+            vec2(0.17583704, -0.41092443),
+            vec2(0.20214844, -0.4092554),
+            vec2(0.21947587, -0.39899445),
+            vec2(0.22944605, -0.39088297),
         ];
-        let p2d_scale = 2. / 1080.;
-        let p2d_offset = vec2(1920., 1080.) * 0.5 * p2d_scale;
-        let p2d = p2d.map(|p| p * p2d_scale - p2d_offset);
 
         for &p in &p3d {
             println!("v {} {} {}", p.x, p.y, p.z);
         }
         for &p in &p2d {
-            println!("v {} {} 0.0", p.x * 0.001, p.y * 0.001);
+            println!("v {} {} 1", p.x, p.y);
         }
 
         let mut solver = SqPnPSolver::<DefaultSqPnPParameters>::new();
@@ -999,7 +999,7 @@ mod tests {
         let t = solution.translation();
 
         for &p in &p3d {
-            let p = r * p + t * 0.01;
+            let p = r * p + t;
             println!("v {} {} {}", p.x, p.y, p.z);
         }
 
@@ -1025,6 +1025,8 @@ mod tests {
         assert!(d3 < 0.1, "x output not a unit {l3}");
         assert!(d4 < 0.1, "y output not a unit {l4}");
         assert!(d5 < 0.1, "z output not a unit {l5}");
+
+        assert!(solution.sq_error < 0.1, "solution is too inaccurate");
     }
 
     #[test]
@@ -1111,5 +1113,7 @@ mod tests {
         }
 
         println!("max distance error: {}", max_d2.sqrt());
+
+        assert!(solution.sq_error < 0.1, "solution is too inaccurate");
     }
 }
