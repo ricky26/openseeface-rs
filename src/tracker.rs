@@ -52,8 +52,8 @@ fn model_data(model: TrackerModel) -> &'static [u8] {
     }
 }
 
-const CONTOUR_INDICES: [usize; 14] = [0,1,8,15,16,27,28,29,30,31,32,33,34,35];
-const CONTOUR_INDICES_T: [usize; 8] = [0,2,8,14,16,27,30,33];
+pub const CONTOUR_INDICES: [usize; 14] = [0,1,8,15,16,27,28,29,30,31,32,33,34,35];
+pub const CONTOUR_INDICES_T: [usize; 8] = [0,2,8,14,16,27,30,33];
 
 fn logit(x: f32, factor: f32) -> f32 {
     let x = x.clamp(1e-7, 1. - 1e-7);
@@ -748,18 +748,21 @@ impl Tracker {
                 tracked.frame_count = 1;
             }
 
+            self.face_boxes.push((pending.bounds_min, pending.bounds_max - pending.bounds_min));
+
             tracked.alive = true;
             tracked.position = pending.centre;
             std::mem::swap(&mut tracked.landmarks, &mut pending.landmarks);
             pending.landmarks.clear();
 
             tracked.update_landmarks_camera(frame.width(), frame.height());
-
-            self.face_boxes.push((pending.bounds_min, pending.bounds_max - pending.bounds_min));
-
             tracked.update_contour(self.contour_indices);
 
             if self.pnp.solve(&self.contour_3d, tracked.contour_2d(), None) {
+                if self.pnp.solutions().len() > 1 {
+                    tracing::warn!("multiple PnP solutions!");
+                }
+
                 let solution = self.pnp.best_solution().unwrap();
                 let t = solution.translation();
                 let rot = solution.rotation_matrix();

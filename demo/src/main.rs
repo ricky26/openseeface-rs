@@ -1,7 +1,10 @@
+use std::fmt::Write;
 use std::time::Instant;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
 use bevy::color::palettes::css::{LIME, YELLOW};
+use bevy::input::common_conditions::{input_just_pressed, input_toggle_active};
 use bevy::log::Level;
 use bevy::math::{uvec2, vec2, vec3};
 use bevy::prelude::*;
@@ -15,8 +18,9 @@ use image::RgbaImage;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{Buffer, CallbackCamera};
+
 use openseeface::face::DEFAULT_FACE;
-use openseeface::tracker::{Tracker, TrackerConfig};
+use openseeface::tracker::{Tracker, TrackerConfig, CONTOUR_INDICES};
 
 pub mod inspector;
 
@@ -111,9 +115,10 @@ fn main_plugin(app: &mut App) {
     app
         .add_systems(Startup, setup)
         .add_systems(Update, (
-            handle_new_camera_frames,
+            handle_new_camera_frames.run_if(input_toggle_active(true, KeyCode::F6)),
             draw_detections,
             draw_landmarks,
+            save_obj.run_if(input_just_pressed(KeyCode::F10)),
         ));
 }
 
@@ -261,18 +266,61 @@ pub fn draw_landmarks(
             gizmos.sphere(p, 0.01, c);
         }
 
+        for &p in face.landmarks_camera() {
+            let p = p.extend(-1.) * vec3(-0.4, 0.4, 1.);
+            gizmos.sphere(p, 0.01, Color::BLACK);
+        }
+
         if face.has_pose() {
             let r = face.rotation();
             let t = face.translation();
 
             for &p in &DEFAULT_FACE {
-                let p = r * p + t;
+                let p = (r * p + t) * vec3(-0.4, 0.4, -1.0);
                 gizmos.sphere(p, 0.01, YELLOW);
             }
-
-            // let start = (vec3(0., 0., 0.) - face.translation()) * vec3(1. / 960., 1. / 540., 1.);
-            // let end = start + face.rotation() * Vec3::Z;
-            // gizmos.arrow(start, end, Color::WHITE);
         }
+    }
+}
+
+pub fn save_obj(
+    tracker: Res<ActiveTracker>,
+) {
+    let Some(face) = tracker.0.faces().first() else {
+        warn!("No visible face, obj not saved");
+        return;
+    };
+
+    let path = "face.obj";
+    let mut contents = String::new();
+    let landmarks = face.landmarks_camera();
+
+    writeln!(&mut contents, "# Camera-space Landmarks").unwrap();
+
+    for &p in landmarks {
+        writeln!(&mut contents, "v {} {} 1", p.x, p.y).unwrap();
+    }
+
+    writeln!(&mut contents, "\n# Camera-space Landmarks\n#").unwrap();
+    for &p in CONTOUR_INDICES.iter().filter_map(|&i| landmarks.get(i)) {
+        writeln!(&mut contents, "# vec2({}, {})", p.x, p.y).unwrap();
+    }
+
+    if face.has_pose() {
+        writeln!(&mut contents, "\n# Transformed Reference Mesh").unwrap();
+
+        let r = face.rotation();
+        let t = face.translation();
+
+        for &p in &DEFAULT_FACE {
+            let p = r * p + t;
+            writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
+        }
+    }
+
+    if let Err(err) = std::fs::write(path, &contents) {
+        error!("Failed to write face mesh: {err}");
+    } else {
+        info!("Face mesh saved to {path}");
     }
 }

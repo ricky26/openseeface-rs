@@ -980,7 +980,9 @@ mod tests {
             vec2(1087.6703, 760.0459),
             vec2(1096.7527, 757.9353),
         ];
-        let p2d = p2d.map(|p| (p / 540.) - 0.5);
+        let p2d_scale = 2. / 1080.;
+        let p2d_offset = vec2(1920., 1080.) * 0.5 * p2d_scale;
+        let p2d = p2d.map(|p| p * p2d_scale - p2d_offset);
 
         for &p in &p3d {
             println!("v {} {} {}", p.x, p.y, p.z);

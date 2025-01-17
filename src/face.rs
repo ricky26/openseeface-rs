@@ -1,4 +1,4 @@
-use glam::{vec3, Mat3, Vec2, Vec3};
+use glam::{uvec2, vec2, vec3, Mat3, Vec2, Vec3};
 use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
 
@@ -496,6 +496,10 @@ impl TrackedFace {
         &self.landmarks
     }
 
+    pub fn landmarks_camera(&self) -> &[Vec2] {
+        &self.landmarks_camera
+    }
+
     pub(crate) fn contour_2d(&self) -> &[Vec2] {
         &self.contour_2d
     }
@@ -539,9 +543,10 @@ impl TrackedFace {
     pub(crate) fn update_landmarks_camera(&mut self, width: u32, height: u32) {
         let size = width.min(height) as f32;
         let scale = 2. / size;
+        let offset = uvec2(width, height).as_vec2() * 0.5 * scale;
         self.landmarks_camera.clear();
         self.landmarks_camera.extend(
-            self.landmarks.iter().map(|&(p, _)| p * scale - 0.5));
+            self.landmarks.iter().map(|&(p, _)| (p * scale - offset) * vec2(1., -1.)));
     }
 
     pub(crate) fn reset(&mut self) {
