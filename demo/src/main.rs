@@ -161,6 +161,7 @@ fn main_plugin(app: &mut App) {
             ).chain(),
             send_packets.run_if(resource_exists::<OsfTarget>),
             save_obj.run_if(input_just_pressed(KeyCode::F10)),
+            dump_debug_images.run_if(input_just_pressed(KeyCode::F11)),
         ));
 }
 
@@ -224,7 +225,7 @@ pub struct CameraInfo {
     pub resolution: UVec2,
 }
 
-pub fn handle_new_camera_frames(
+fn handle_new_camera_frames(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera_image: Res<CameraImage>,
@@ -260,7 +261,7 @@ pub fn handle_new_camera_frames(
     }
 }
 
-pub fn draw_detections(
+fn draw_detections(
     mut gizmos: Gizmos,
     camera_info: Res<CameraInfo>,
     tracker: Res<ActiveTracker>,
@@ -288,7 +289,7 @@ pub fn draw_detections(
     }
 }
 
-pub fn draw_landmarks(
+fn draw_landmarks(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
@@ -301,7 +302,7 @@ pub fn draw_landmarks(
     }
 }
 
-pub fn draw_reference_face(
+fn draw_reference_face(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
@@ -320,7 +321,7 @@ pub fn draw_reference_face(
     }
 }
 
-pub fn draw_face_3d(
+fn draw_face_3d(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
@@ -339,7 +340,7 @@ pub fn draw_face_3d(
     }
 }
 
-pub fn save_obj(
+fn save_obj(
     tracker: Res<ActiveTracker>,
 ) {
     let Some(face) = tracker.0.faces().first() else {
@@ -360,7 +361,7 @@ pub fn save_obj(
         v += 1;
     }
     for i in 0..69 {
-        writeln!(&mut contents, "l {} {}", i + vo, i + vo + 1).unwrap();
+        writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
     }
 
     writeln!(&mut contents, "\n# Contour\n#").unwrap();
@@ -369,7 +370,18 @@ pub fn save_obj(
     }
 
     if face.has_pose() {
-        writeln!(&mut contents, "\n# Transformed Reference Mesh\no reference").unwrap();
+        writeln!(&mut contents, "\n# Reference Mesh\no reference").unwrap();
+
+        let vo = v;
+        for &p in &DEFAULT_FACE {
+            writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
+            v += 1;
+        }
+        for i in 0..69 {
+            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+        }
+
+        writeln!(&mut contents, "\n# Transformed Reference Mesh\no transformed_reference").unwrap();
 
         let r = face.rotation();
         let t = face.translation();
@@ -381,10 +393,21 @@ pub fn save_obj(
             v += 1;
         }
         for i in 0..69 {
-            writeln!(&mut contents, "l {} {}", i + vo, i + vo + 1).unwrap();
+            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
         }
 
         writeln!(&mut contents, "\n# 3D Face\no face_3d").unwrap();
+
+        let vo = v;
+        for &p in face.face_3d() {
+            writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
+            v += 1;
+        }
+        for i in 0..69 {
+            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+        }
+
+        writeln!(&mut contents, "\n# Transformed 3D Face\no transformed_face_3d").unwrap();
 
         let vo = v;
         for &p in face.face_3d() {
@@ -393,7 +416,7 @@ pub fn save_obj(
             v += 1;
         }
         for i in 0..69 {
-            writeln!(&mut contents, "l {} {}", i + vo, i + vo + 1).unwrap();
+            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
         }
     }
 
@@ -410,7 +433,7 @@ pub struct OsfTarget {
     target: SocketAddr,
 }
 
-pub fn send_packets(
+fn send_packets(
     time: Res<Time>,
     target: Res<OsfTarget>,
     camera: Res<CameraInfo>,
@@ -450,4 +473,18 @@ pub fn send_packets(
     }
 
     target.socket.send_to(&buffer, target.target).unwrap();
+}
+
+fn dump_debug_images(
+    tracker: Res<ActiveTracker>,
+) {
+    for (name, image) in tracker.0.iter_debug_images() {
+        let path = format!("{name}.exr");
+        let image = tracker.0.denormalise_image(image);
+        if let Err(err) = image.save(&path) {
+            error!("Failed to write {path}: {err}");
+        } else {
+            info!("Wrote {path}");
+        }
+    }
 }

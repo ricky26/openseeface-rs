@@ -622,17 +622,17 @@ impl TrackedFace {
     }
 
     fn update_eye_3d(&mut self, offset: usize, outer_index: usize) {
-        let outer_ln = self.landmarks_camera[outer_index];
+        let outer_lm = self.landmarks_camera[outer_index];
         let outer_3d = self.face_3d[outer_index];
         let inner_index = outer_index + 3;
-        let inner_ln = self.landmarks_camera[inner_index];
+        let inner_lm = self.landmarks_camera[inner_index];
         let inner_3d = self.face_3d[inner_index];
+        let pupil_lm = self.landmarks_camera[offset];
 
         // Update pupil 3D point.
-        let pupil_lm = self.landmarks_camera[offset];
-        let d1 = (pupil_lm - outer_ln).length();
-        let d2 = (pupil_lm - inner_ln).length();
-        let pt = (self.face_3d[outer_index] * d1 + self.face_3d[inner_index] * d2) / (d1 + d2);
+        let d1 = (pupil_lm - outer_lm).length();
+        let d2 = (pupil_lm - inner_lm).length();
+        let pt = (outer_3d * d1 + inner_3d * d2) / (d1 + d2);
         let r = self.rotation * pt + self.translation;
         let pupil_3d = pupil_lm.extend(1.) * r.z;
         let pupil_3d = self.inv_rotation.mul_vec3(pupil_3d - self.translation);

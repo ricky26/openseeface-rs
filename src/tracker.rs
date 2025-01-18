@@ -1,7 +1,6 @@
-use std::path::Path;
 use std::sync::LazyLock;
 
-use glam::{uvec2, vec2, vec3, vec4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{uvec2, vec2, vec3, vec4, Mat2, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
 use image::{GenericImage, GenericImageView, Rgb, Rgb32FImage, SubImage};
 use imageproc::geometric_transformations::{warp_into, Interpolation, Projection};
 use ndarray::{s, ArrayViewD, Axis};
@@ -9,7 +8,7 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
 use crate::face::TrackedFace;
-use crate::geometry::{compensate, rotate};
+use crate::geometry::{angle, rotate};
 use crate::image::ImageArrayExt;
 use crate::retinaface::RetinaFaceDetector;
 
@@ -120,16 +119,12 @@ impl ImagePreparer {
         self.prepare_image_warp(out, frame, &projection)
     }
 
-    #[allow(dead_code)]
-    pub fn save(
-        &self, frame: &Rgb32FImage,
-        path: impl AsRef<Path>,
-    ) -> Result<(), image::ImageError> {
-        let mut tmp = frame.clone();
-        for pixel in tmp.pixels_mut() {
+    pub fn denormalise_image(&self, frame: &Rgb32FImage) -> Rgb32FImage {
+        let mut result = frame.clone();
+        for pixel in result.pixels_mut() {
             pixel.0 = ((Vec3::from_array(pixel.0) + self.mean) / self.std).to_array();
         }
-        tmp.save(path)
+        result
     }
 }
 
@@ -252,6 +247,18 @@ impl Tracker {
 
     pub fn pending_faces(&self) -> &[PendingFace] {
         &self.pending_faces[..self.num_pending_faces]
+    }
+
+    pub fn iter_debug_images(&self) -> impl Iterator<Item = (&'static str, &Rgb32FImage)> {
+        [
+            ("face_detect_224", &self.face_detect_224),
+            ("face_scratch_res", &self.face_scratch_res),
+            ("eyes_scratch_32", &self.eyes_scratch_32),
+        ].into_iter()
+    }
+
+    pub fn denormalise_image(&self, frame: &Rgb32FImage) -> Rgb32FImage {
+        self.image_prep.denormalise_image(frame)
     }
 
     pub fn new(
@@ -392,36 +399,30 @@ impl Tracker {
         Ok(())
     }
 
-    fn corners_to_eye(inner: Vec2, outer: Vec2, size: Vec2) -> (Vec2, Vec2, f32) {
-        let (outer_flat, a) = compensate(inner, outer);
-        let center = (inner + outer_flat) / 2.;
-        let radius = (inner - center).length();
-        let eye_size = vec2(1.4, 1.2) * radius;
-        let tl = (center - eye_size).clamp(Vec2::ZERO, size);
-        let br = (center + eye_size).clamp(Vec2::ZERO, size);
-        (tl, br, a)
-    }
-
     fn prepare_eye(
         &mut self, frame: &Rgb32FImage, inner: Vec2, outer: Vec2, flip: bool,
-    ) -> (Vec2, Vec2, Vec2, f32) {
-        let size = uvec2(frame.width(), frame.height()).as_vec2();
-        let (tl, br, a) = Self::corners_to_eye(inner, outer, size);
+    ) -> (Vec2, Mat2, Vec2, f32) {
+        let out_size = 32.;
+        let half_out = out_size * 0.5;
 
-        let base_scale = 32. / (br - tl);
-        let mut scale_x = base_scale.x;
-        let scale_y = -base_scale.y;
-        let mut offset = vec2(tl.x, br.y);
+        let angle = angle(outer, inner);
+        let center = (outer + inner) / 2.;
+        let eye_size = (outer - inner).length();
+        let src_size = vec2(1.4, 1.2) * eye_size;
+        let half_size = src_size * 0.5;
+        let base_scale = out_size / src_size;
+        let tl = center - Vec2::from_angle(-angle).rotate(half_size);
+        let m = Mat2::from_scale_angle(1. / base_scale, -angle);
+        let mut scale = base_scale;
         if flip {
-            scale_x *= -1.;
-            offset.x = br.x;
+            scale.x *= -1.;
         }
-        let projection = Projection::scale(scale_x, scale_y)
-            * Projection::translate(inner.x - offset.x, inner.y - offset.y)
-            * Projection::rotate(a)
-            * Projection::translate(-inner.x, -inner.y);
+        let projection = Projection::translate(half_out, half_out)
+            * Projection::scale(scale.x, scale.y)
+            * Projection::rotate(-angle)
+            * Projection::translate(-center.x, -center.y);
         self.image_prep.prepare_image_warp(&mut self.eye_scratch_32, frame, &projection);
-        (tl, 1. / base_scale, inner, a)
+        (tl, m, outer, angle)
     }
 
     fn extract_face<'a>(
@@ -458,8 +459,8 @@ impl Tracker {
         results: &ArrayViewD<f32>,
         index: usize,
         offset: Vec2,
-        scale: Vec2,
-        inner: Vec2,
+        m: Mat2,
+        outer: Vec2,
         angle: f32,
     ) -> (Vec2, f32) {
         let t_c = results.slice(s![index, 0, .., ..]);
@@ -488,10 +489,8 @@ impl Tracker {
         let x_eye = if index > 0 { 32. - x_eye } else { x_eye };
 
         let rel = vec2(x_eye, y_eye);
-        let rotated = offset + scale * rel;
-        let position = rotate(inner, rotated, -angle);
-
-        (position, c)
+        let p = offset + m.mul_vec2(rel);
+        (p, c)
     }
 
     #[allow(clippy::type_complexity)]
@@ -508,9 +507,9 @@ impl Tracker {
         let inner_l = landmarks[45].0;
         let outer_l = landmarks[42].0;
 
-        let (pos_r, scale_r, ref_r, a_r) = self.prepare_eye(frame, inner_r, outer_r, false);
+        let (pos_r, m_r, ref_r, a_r) = self.prepare_eye(frame, inner_r, outer_r, false);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 0).unwrap();
-        let (pos_l, scale_l, ref_l, a_l) = self.prepare_eye(frame, inner_l, outer_l, true);
+        let (pos_l, m_l, ref_l, a_l) = self.prepare_eye(frame, inner_l, outer_l, true);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 32).unwrap();
 
         let input = self.eyes_scratch_32.as_view()
@@ -521,8 +520,8 @@ impl Tracker {
         let outputs = self.gaze_session.run(ort::inputs![input]?)?;
         let results = outputs[0].try_extract_tensor::<f32>()?;
 
-        let eye_r = self.process_eye(&results, 0, pos_r, scale_r, ref_r, a_r);
-        let eye_l = self.process_eye(&results, 1, pos_l, scale_l, ref_l, a_l);
+        let eye_r = self.process_eye(&results, 0, pos_r, m_r, ref_r, a_r);
+        let eye_l = self.process_eye(&results, 1, pos_l, m_l, ref_l, a_l);
         Ok((eye_r, eye_l))
     }
 

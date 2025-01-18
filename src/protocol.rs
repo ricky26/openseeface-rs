@@ -32,9 +32,9 @@ impl FaceUpdate<'_> {
         out.write_f32::<E>(self.blink_left).unwrap();
         out.write_u8(if self.success { 1 } else { 0 }).unwrap();
         out.write_f32::<E>(self.pnp_error).unwrap();
-        out.write_f32::<E>(self.rotation.y).unwrap();
+        out.write_f32::<E>(-self.rotation.y).unwrap();
         out.write_f32::<E>(self.rotation.x).unwrap();
-        out.write_f32::<E>(self.rotation.z).unwrap();
+        out.write_f32::<E>(-self.rotation.z).unwrap();
         out.write_f32::<E>(self.rotation.w).unwrap();
         out.write_f32::<E>(self.rotation_euler.x).unwrap();
         out.write_f32::<E>(self.rotation_euler.y).unwrap();

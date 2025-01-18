@@ -14,7 +14,6 @@ pub fn normalise_angle(mut angle: f32) -> f32 {
 }
 
 pub fn rotate(origin: Vec2, point: Vec2, a: f32) -> Vec2 {
-    let a = -a;
     origin + Vec2::from_angle(-a).rotate(point - origin)
 }
 
