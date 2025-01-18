@@ -392,7 +392,9 @@ impl Tracker {
                 let y = (y as f32 * 4. - r) * scale - offset.y;
                 let w = (2. * r) * scale;
                 let h = (2. * r) * scale;
-                self.face_boxes.push((vec2(x, y), vec2(w, h)));
+                let min = vec2(x, y);
+                let max = vec2(w, h);
+                self.face_boxes.push((min, max));
             }
         }
 
@@ -731,7 +733,9 @@ impl Tracker {
             let pending = &mut self.pending_faces[idx];
             let tracked = &mut self.tracked_faces[tracked_idx];
 
-            self.face_boxes.push((pending.bounds_min, pending.size));
+            let centre = pending.bounds_min + pending.size * 0.5;
+            let size = pending.size * 1.2;
+            self.face_boxes.push((centre - size * 0.5, size));
 
             tracked.update(
                 frame.width(),
