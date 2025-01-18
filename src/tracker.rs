@@ -1,6 +1,6 @@
 use std::sync::LazyLock;
 
-use glam::{uvec2, vec2, vec3, vec4, Mat2, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{uvec2, vec2, vec3, Mat2, UVec2, Vec2, Vec3};
 use image::{GenericImage, GenericImageView, Rgb, Rgb32FImage, SubImage};
 use imageproc::geometric_transformations::{warp_into, Interpolation, Projection};
 use ndarray::{s, ArrayViewD, Axis};
@@ -8,7 +8,6 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
 use crate::face::TrackedFace;
-use crate::geometry::angle;
 use crate::image::ImageArrayExt;
 use crate::retinaface::RetinaFaceDetector;
 
@@ -188,6 +187,8 @@ pub struct PendingFace {
     pub confidence: f32,
     pub centre: Vec2,
     pub size: Vec2,
+    pub image_min: UVec2,
+    pub image_max: UVec2,
     pub bounds_min: Vec2,
     pub bounds_max: Vec2,
 }
@@ -230,7 +231,6 @@ pub struct Tracker {
     num_tracked_faces: usize,
     wait_count: usize,
     face_boxes: Vec<(Vec2, Vec2)>,
-    crops: Vec<(Vec4, Vec2, f32)>,
     pending_faces: Vec<PendingFace>,
     num_pending_faces: usize,
     pending_face_indices: Vec<usize>,
@@ -337,7 +337,6 @@ impl Tracker {
             num_tracked_faces: 0,
             wait_count: 0,
             face_boxes: Vec::new(),
-            crops: Vec::new(),
             pending_faces,
             num_pending_faces: 0,
             pending_face_indices,
@@ -395,7 +394,7 @@ impl Tracker {
         let out_size = 32.;
         let half_out = out_size * 0.5;
 
-        let angle = angle(outer, inner);
+        let angle = (inner - outer).to_angle();
         let center = (outer + inner) / 2.;
         let eye_size = (outer - inner).length();
         let src_size = vec2(1.6, 1.2) * eye_size;
@@ -484,13 +483,15 @@ impl Tracker {
     }
 
     fn detect_landmarks(
-        &mut self, frame: &Rgb32FImage, face_index: usize, bounds: Vec4, scale: Vec2,
+        &mut self, frame: &Rgb32FImage, face_index: usize, min: Vec2, max: Vec2,
     ) -> Result<f32, ort::Error> {
         let size = uvec2(frame.width(), frame.height()).as_vec2();
-        let min = bounds.xy().clamp(Vec2::ZERO, size).as_uvec2();
-        let max = (bounds.zw() + 1.).clamp(Vec2::ZERO, size).as_uvec2();
+        let min = min.clamp(Vec2::ZERO, size).as_uvec2();
+        let max = (max + 1.).clamp(Vec2::ZERO, size).as_uvec2();
         let crop_size = max - min;
         let crop = frame.view(min.x, min.y, crop_size.x, crop_size.y);
+        let scale = crop_size.as_vec2() / (self.res as f32);
+
         self.image_prep.prepare_sub_image(&mut self.face_scratch_res, &crop);
         let input = self.face_scratch_res.as_view()
             .insert_axis(Axis(0))
@@ -504,7 +505,7 @@ impl Tracker {
             _ => (66, 132, 198),
         };
 
-        let res_1 = (self.res - 1) as f32;
+        let res_1 = (self.res - 0) as f32;
         let res_scale = res_1 / (self.out_res as f32);
         let t_c = result.slice(s![0, 0..c0, .., ..]);
         let t_y = result.slice(s![0, c0..c1, .., ..]);
@@ -513,7 +514,10 @@ impl Tracker {
         let mut total_c = 0.;
         let face = &mut self.pending_faces[face_index];
         face.landmarks.clear();
+        face.image_min = min;
+        face.image_max = max;
 
+        let min = min.as_vec2();
         for index in 0..c0 {
             let t_c = t_c.slice(s![index, .., ..]);
             let (x, y, c) = t_c.indexed_iter()
@@ -534,8 +538,8 @@ impl Tracker {
             let y_off = t_y[[index, y, x]];
             let x_off = res_1 * logit(x_off, self.logit_factor);
             let y_off = res_1 * logit(y_off, self.logit_factor);
-            let x_off = bounds.x + scale.x * (res_scale * (x as f32) + x_off);
-            let y_off = bounds.y + scale.y * (res_scale * (y as f32) + y_off);
+            let x_off = min.x + scale.x * (res_scale * (x as f32) + x_off);
+            let y_off = min.y + scale.y * (res_scale * (y as f32) + y_off);
             let off = vec2(x_off, y_off);
 
             if self.config.model_type == TrackerModel::ModelT {
@@ -553,8 +557,6 @@ impl Tracker {
 
     #[tracing::instrument(skip_all)]
     pub fn detect(&mut self, frame: &Rgb32FImage, now: f64) -> Result<(), ort::Error> {
-        let size = uvec2(frame.width(), frame.height());
-
         self.frame_count += 1;
         self.wait_count += 1;
 
@@ -592,37 +594,25 @@ impl Tracker {
             return Ok(());
         }
 
-        let size_f = size.as_vec2() - Vec2::splat(1.);
-        for (index, &(min, size)) in self.face_boxes.iter().enumerate() {
-            let [x, y] = min.to_array();
-            let [w, h] = size.to_array();
-            let x1 = (x - (w * 0.1).floor()).clamp(0., size_f.x);
-            let y1 = (y - (h * 0.125).floor()).clamp(0., size_f.y);
-            let x2 = (x + w + (w * 0.1).floor()).clamp(0., size_f.x);
-            let y2 = (y + h + (h * 0.125).floor()).clamp(0., size_f.y);
-
-            if x2 - x1 < 4. || y2 - y1 < 4. {
-                continue;
-            }
-
-            let scale_x = (x2 - x1) / (self.res as f32);
-            let scale_y = (y2 - y1) / (self.res as f32);
-
-            let bounds = vec4(x1, y1, x2, y2);
-            let scale = vec2(scale_x, scale_y);
-            let expand = if index >= existing_face_count { 0.0 } else { 0.1 };
-            self.crops.push((bounds, scale, expand));
-        }
-
         self.num_pending_faces = 0;
-        let mut crops = std::mem::take(&mut self.crops);
-        for (bounds, scale, expand) in crops.drain(..) {
+        let mut face_boxes = std::mem::take(&mut self.face_boxes);
+        for (index, (min, size)) in face_boxes.drain(..).enumerate() {
             if self.num_pending_faces >= self.pending_faces.len() {
                 break;
             }
 
+            let expand = if index >= existing_face_count { 0.0 } else { 0.1 };
+            let mid = min + size * 0.5;
+            let half_size = size * (0.6 + expand);
+            if half_size.x < 2. || half_size.y < 2. {
+                continue;
+            }
+
+            let min = mid - half_size;
+            let max = mid + half_size;
+
             let index = self.num_pending_faces;
-            let c = self.detect_landmarks(frame, index, bounds, scale)? + expand;
+            let c = self.detect_landmarks(frame, index, min, max)? + expand;
             if c < self.config.threshold {
                 continue;
             }
@@ -637,7 +627,7 @@ impl Tracker {
             face.landmarks.extend([eye_r, eye_l]);
             face.update_bounds();
         }
-        self.crops = crops;
+        self.face_boxes = face_boxes;
 
         self.pending_face_indices.clear();
         self.pending_face_indices.extend(0..self.num_pending_faces);
@@ -661,7 +651,6 @@ impl Tracker {
         }
         self.pending_face_indices.retain(|&idx| !self.pending_faces[idx].disabled);
 
-        self.face_boxes.clear();
         self.num_tracked_faces = 0;
         while !self.pending_face_indices.is_empty()
             && self.num_tracked_faces < self.tracked_faces.len() {
@@ -689,14 +678,15 @@ impl Tracker {
 
             let pending = &mut self.pending_faces[idx];
             let tracked = &mut self.tracked_faces[tracked_idx];
-
-            let centre = pending.bounds_min + pending.size * 0.5;
-            let size = pending.size * 1.2;
+            let centre = pending.centre;
+            let size = pending.size;
             self.face_boxes.push((centre - size * 0.5, size));
 
             tracked.update(
                 frame.width(),
                 frame.height(),
+                pending.image_min,
+                pending.image_max,
                 pending.centre,
                 pending.size,
                 &mut pending.landmark_confidence,

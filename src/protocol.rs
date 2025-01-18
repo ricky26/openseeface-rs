@@ -40,9 +40,9 @@ impl FaceUpdate<'_> {
         out.write_f32::<E>(self.rotation_euler.x).unwrap();
         out.write_f32::<E>(self.rotation_euler.y).unwrap();
         out.write_f32::<E>(self.rotation_euler.z).unwrap();
-        out.write_f32::<E>(self.translation.x).unwrap();
         out.write_f32::<E>(self.translation.y).unwrap();
-        out.write_f32::<E>(self.translation.z).unwrap();
+        out.write_f32::<E>(-self.translation.x).unwrap();
+        out.write_f32::<E>(-self.translation.z).unwrap();
         for &c in self.landmark_confidence {
             out.write_f32::<E>(c).unwrap();
         }

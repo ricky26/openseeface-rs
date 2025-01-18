@@ -15,7 +15,7 @@ use bevy::utils::tracing::span;
 use bevy_inspector_egui::DefaultInspectorConfigPlugin;
 use clap::Parser;
 use image::buffer::ConvertBuffer;
-use image::RgbaImage;
+use image::{Rgb, RgbaImage};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{Buffer, CallbackCamera};
@@ -246,6 +246,8 @@ fn handle_new_camera_frames(
         let span = span!(Level::DEBUG, "frame");
         let _span = span.enter();
 
+        **updated = true;
+
         let now = Instant::now();
         let now64 = (now - epoch.0).as_secs_f64();
 
@@ -266,7 +268,6 @@ fn handle_new_camera_frames(
         let rgba: RgbaImage = image.convert();
         texture.data.copy_from_slice(rgba.as_raw());
         materials.get_mut(&camera_material.0);
-        **updated = true;
     }
 }
 
@@ -303,12 +304,11 @@ fn draw_landmarks(
     tracker: Res<ActiveTracker>,
 ) {
     let landmarks_z = -4.5;
-    let camera_z = -1.2;
+    let camera_z = -1.25;
     let scale = (landmarks_z / camera_z) * vec3(-2., 2., 1.);
 
     for face in tracker.0.faces() {
         let landmarks_camera = face.landmarks_camera();
-
         for (&p, &c) in landmarks_camera.iter().zip(face.landmark_confidence()) {
             let p = p.extend(camera_z) * scale;
             let c = Color::hsv(c * 270., 1., 1.);
@@ -364,7 +364,7 @@ fn draw_face_3d(
         let r = face.rotation();
         let t = face.translation();
         let transform_point = move |p|
-            (r * p + t) * vec3(-1., 1., -0.6);
+            (r * p + t) * vec3(-1.6, 1.6, -1.) * 0.5;
 
         for (&p, &c) in face_3d.iter().zip(face.landmark_confidence()) {
             let p = transform_point(p);
@@ -522,11 +522,34 @@ fn dump_debug_images(
 ) {
     for (name, image) in tracker.0.iter_debug_images() {
         let path = format!("{name}.exr");
-        let image = tracker.0.denormalise_image(image);
+        let mut image = tracker.0.denormalise_image(image);
         if let Err(err) = image.save(&path) {
             error!("Failed to write {path}: {err}");
         } else {
             info!("Wrote {path}");
+        }
+
+        if name == "face_scratch_res" {
+            if let Some(face) = tracker.0.faces().last() {
+                let path = "landmarks.exr";
+                let out_size = uvec2(image.width(), image.height()).as_vec2();
+                let min = face.image_min().as_vec2();
+                let max = face.image_max().as_vec2();
+                let src_size = max - min;
+                let scale = out_size / src_size;
+                let rgb = Rgb([0.0, 0.0, 1.0]);
+                for (&p, &c) in face.landmarks_image().iter().zip(face.landmark_confidence()) {
+                    let p2 = (p - min) * scale;
+                    let up = p2.as_uvec2();
+                    image.put_pixel(up.x, up.y, rgb);
+                }
+
+                if let Err(err) = image.save(path) {
+                    error!("Failed to write {path}: {err}");
+                } else {
+                    info!("Wrote {path}");
+                }
+            }
         }
     }
 }

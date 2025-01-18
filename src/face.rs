@@ -1,4 +1,4 @@
-use glam::{uvec2, vec2, vec3, Mat3, Quat, Vec2, Vec3};
+use glam::{uvec2, vec2, vec3, Mat3, Quat, UVec2, Vec2, Vec3};
 use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
 use sqpnp::{SqPnPSolution, SqPnPSolver};
@@ -564,6 +564,8 @@ pub struct TrackedFace {
     frame_count: usize,
     centre: Vec2,
     size: Vec2,
+    image_min: UVec2,
+    image_max: UVec2,
     landmark_confidence: Vec<f32>,
     landmarks_image: Vec<Vec2>,
     landmarks_camera: Vec<Vec2>,
@@ -594,6 +596,14 @@ impl TrackedFace {
 
     pub fn size(&self) -> Vec2 {
         self.size
+    }
+
+    pub fn image_min(&self) -> UVec2 {
+        self.image_min
+    }
+
+    pub fn image_max(&self) -> UVec2 {
+        self.image_max
     }
 
     pub fn landmark_confidence(&self) -> &[f32] {
@@ -661,6 +671,8 @@ impl TrackedFace {
             pnp_solver,
             centre: Vec2::ZERO,
             size: Vec2::ZERO,
+            image_min: UVec2::ZERO,
+            image_max: UVec2::ZERO,
             frame_count: 0,
             landmark_confidence: Vec::with_capacity(NUM_FACE_LANDMARKS),
             landmarks_image: Vec::with_capacity(NUM_FACE_LANDMARKS),
@@ -743,8 +755,7 @@ impl TrackedFace {
             let cp = z_plane.dot(np);
             let z = c / cp;
             let np = np * z;
-            let np = ir.mul_vec3(np - t);
-            *p = np;
+            *p = ir.mul_vec3(np - t);
 
             if index < 17 || index == 30 {
                 let rp = r.mul_vec3(fp) + t;
@@ -759,12 +770,17 @@ impl TrackedFace {
 
         let err = (err / (2. * (self.landmarks_image.len() as f32))).sqrt();
         self.pnp_error = err;
+        if self.pnp_error > 300. {
+            tracing::warn!("significant PnP error");
+        }
     }
 
     pub(crate) fn update(
         &mut self,
         frame_width: u32,
         frame_height: u32,
+        image_min: UVec2,
+        image_max: UVec2,
         centre: Vec2,
         size: Vec2,
         confidence: &mut Vec<f32>,
@@ -780,6 +796,8 @@ impl TrackedFace {
         self.alive = true;
         self.centre = centre;
         self.size = size;
+        self.image_min = image_min;
+        self.image_max = image_max;
         self.landmark_confidence.clear();
         self.landmarks_image.clear();
         std::mem::swap(&mut self.landmark_confidence, confidence);
