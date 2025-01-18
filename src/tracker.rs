@@ -8,7 +8,7 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
 use crate::face::TrackedFace;
-use crate::geometry::{angle, rotate};
+use crate::geometry::angle;
 use crate::image::ImageArrayExt;
 use crate::retinaface::RetinaFaceDetector;
 

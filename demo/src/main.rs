@@ -4,7 +4,7 @@ use std::time::Instant;
 use anyhow::{anyhow, Context};
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
-use bevy::color::palettes::css::{LIME, YELLOW};
+use bevy::color::palettes::css::{DARK_BLUE, LIME, ORANGE, YELLOW};
 use bevy::input::common_conditions::{input_just_pressed, input_toggle_active};
 use bevy::log::Level;
 use bevy::math::{uvec2, vec2, vec3};
@@ -20,7 +20,7 @@ use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::{Buffer, CallbackCamera};
 
-use openseeface::face::DEFAULT_FACE;
+use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
 use openseeface::protocol::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
 
@@ -293,11 +293,20 @@ fn draw_landmarks(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
+    let scale = vec3(-0.4, 0.4, 1.) * 4.9;
     for face in tracker.0.faces() {
-        for (&(_, c), &p) in face.landmarks().iter().zip(face.landmarks_camera()) {
-            let p = p.extend(-1.) * vec3(-0.4, 0.4, 1.) * 4.9;
+        let landmarks_camera = face.landmarks_camera();
+
+        for (&(_, c), &p) in face.landmarks().iter().zip(landmarks_camera) {
+            let p = p.extend(-1.) * scale;
             let c = Color::hsv(c * 270., 1., 1.);
             gizmos.sphere(p, 0.01, c);
+        }
+
+        for &(a, b) in &FACE_EDGES[..(FACE_EDGES.len() - 2)] {
+            let pa = landmarks_camera[a].extend(-1.) * scale;
+            let pb = landmarks_camera[b].extend(-1.) * scale;
+            gizmos.line(pa, pb, DARK_BLUE);
         }
     }
 }
@@ -314,9 +323,18 @@ fn draw_reference_face(
         let r = face.rotation();
         let t = face.translation();
 
+        let transform_point = move |p|
+            (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
+
         for &p in &DEFAULT_FACE {
-            let p = (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
+            let p = transform_point(p);
             gizmos.sphere(p, 0.01, YELLOW);
+        }
+
+        for &(a, b) in &FACE_EDGES {
+            let pa = transform_point(DEFAULT_FACE[a]);
+            let pb = transform_point(DEFAULT_FACE[b]);
+            gizmos.line(pa, pb, YELLOW);
         }
     }
 }
@@ -330,12 +348,21 @@ fn draw_face_3d(
             continue;
         }
 
+        let face_3d = face.face_3d();
         let r = face.rotation();
         let t = face.translation();
+        let transform_point = move |p|
+            (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
 
-        for &p in face.face_3d() {
-            let p = (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
-            gizmos.sphere(p, 0.01, YELLOW);
+        for &p in face_3d {
+            let p = transform_point(p);
+            gizmos.sphere(p, 0.01, ORANGE);
+        }
+
+        for &(a, b) in &FACE_EDGES {
+            let pa = transform_point(face_3d[a]);
+            let pb = transform_point(face_3d[b]);
+            gizmos.line(pa, pb, YELLOW);
         }
     }
 }
@@ -360,8 +387,8 @@ fn save_obj(
         writeln!(&mut contents, "v {} {} 1", p.x, p.y).unwrap();
         v += 1;
     }
-    for i in 0..69 {
-        writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+    for &(a, b) in &FACE_EDGES {
+        writeln!(&mut contents, "l {} {}", a + vo + 1, b + vo + 1).unwrap();
     }
 
     writeln!(&mut contents, "\n# Contour\n#").unwrap();
@@ -377,8 +404,8 @@ fn save_obj(
             writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
             v += 1;
         }
-        for i in 0..69 {
-            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+        for &(a, b) in &FACE_EDGES {
+            writeln!(&mut contents, "l {} {}", a + vo + 1, b + vo + 1).unwrap();
         }
 
         writeln!(&mut contents, "\n# Transformed Reference Mesh\no transformed_reference").unwrap();
@@ -392,8 +419,8 @@ fn save_obj(
             writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
             v += 1;
         }
-        for i in 0..69 {
-            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+        for &(a, b) in &FACE_EDGES {
+            writeln!(&mut contents, "l {} {}", a + vo + 1, b + vo + 1).unwrap();
         }
 
         writeln!(&mut contents, "\n# 3D Face\no face_3d").unwrap();
@@ -403,8 +430,8 @@ fn save_obj(
             writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
             v += 1;
         }
-        for i in 0..69 {
-            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+        for &(a, b) in &FACE_EDGES {
+            writeln!(&mut contents, "l {} {}", a + vo + 1, b + vo + 1).unwrap();
         }
 
         writeln!(&mut contents, "\n# Transformed 3D Face\no transformed_face_3d").unwrap();
@@ -415,8 +442,8 @@ fn save_obj(
             writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
             v += 1;
         }
-        for i in 0..69 {
-            writeln!(&mut contents, "l {} {}", i + vo + 1, i + vo + 2).unwrap();
+        for &(a, b) in &FACE_EDGES {
+            writeln!(&mut contents, "l {} {}", a + vo + 1, b + vo + 1).unwrap();
         }
     }
 
