@@ -4,7 +4,7 @@ use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{align_points, angle};
-use crate::sqpnp::{SqPnPSolution, SqPnPSolver};
+use sqpnp::{SqPnPSolution, SqPnPSolver};
 
 pub const NUM_FACE_LANDMARKS: usize = 70;
 pub type FaceLandmarks3d = [Vec3; NUM_FACE_LANDMARKS];

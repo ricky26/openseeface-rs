@@ -4523,16 +4523,13 @@ dependencies = [
  "glam",
  "image",
  "imageproc",
- "nalgebra 0.33.2",
  "ndarray",
- "nokhwa",
- "nokhwa-bindings-linux",
  "ort",
- "rand",
  "remedian",
  "serde",
  "serde_json",
  "similari",
+ "sqpnp",
  "tracing",
 ]
 
@@ -5635,6 +5632,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eda41003dc44290527a59b13432d4a0379379fa074b70174882adfbdfd917844"
 dependencies = [
  "bitflags 2.7.0",
+]
+
+[[package]]
+name = "sqpnp"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1b7dc6594dea329f22df4ad05e69ad525472b664842ab30d2a02cf9f0aa3c19"
+dependencies = [
+ "glam",
+ "nalgebra 0.33.2",
 ]
 
 [[package]]
