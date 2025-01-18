@@ -1,6 +1,7 @@
 use std::fmt::Write;
+use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
 use bevy::color::palettes::css::{LIME, YELLOW};
@@ -20,6 +21,7 @@ use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatTyp
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::DEFAULT_FACE;
+use openseeface::protocol::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
 
 pub mod inspector;
@@ -43,6 +45,9 @@ struct Options {
 
     #[arg(long, default_value = "3", help = "Pick face tracking model to use")]
     pub model: i32,
+
+    #[arg(short, long, help = "Address to send OpenSeeFace packets to")]
+    pub address: Option<String>,
 }
 
 
@@ -101,6 +106,16 @@ fn main() -> anyhow::Result<()> {
             main_plugin,
         ));
 
+    if let Some(target) = opts.address.as_ref() {
+        let target = target.parse()
+            .context("parsing target address")?;
+        let socket = UdpSocket::bind("127.0.0.1:0")?;
+        app.insert_resource(OsfTarget {
+            socket,
+            target,
+        });
+    }
+
     let camera_image = Image::new_fill(
         Extent3d {
             width: camera_format.width(),
@@ -141,8 +156,10 @@ fn main_plugin(app: &mut App) {
                     draw_detections,
                     draw_landmarks,
                     draw_reference_face.run_if(input_toggle_active(false, KeyCode::F3)),
+                    draw_face_3d.run_if(input_toggle_active(false, KeyCode::F4)),
                 ),
             ).chain(),
+            send_packets.run_if(resource_exists::<OsfTarget>),
             save_obj.run_if(input_just_pressed(KeyCode::F10)),
         ));
 }
@@ -303,6 +320,25 @@ pub fn draw_reference_face(
     }
 }
 
+pub fn draw_face_3d(
+    mut gizmos: Gizmos,
+    tracker: Res<ActiveTracker>,
+) {
+    for face in tracker.0.faces() {
+        if !face.has_pose() {
+            continue;
+        }
+
+        let r = face.rotation();
+        let t = face.translation();
+
+        for &p in face.face_3d() {
+            let p = (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
+            gizmos.sphere(p, 0.01, YELLOW);
+        }
+    }
+}
+
 pub fn save_obj(
     tracker: Res<ActiveTracker>,
 ) {
@@ -314,27 +350,50 @@ pub fn save_obj(
     let path = "face.obj";
     let mut contents = String::new();
     let landmarks = face.landmarks_camera();
+    let mut v = 0;
 
-    writeln!(&mut contents, "# Camera-space Landmarks").unwrap();
+    writeln!(&mut contents, "# Camera-space Landmarks\no landmarks").unwrap();
 
+    let vo = v;
     for &p in landmarks {
         writeln!(&mut contents, "v {} {} 1", p.x, p.y).unwrap();
+        v += 1;
+    }
+    for i in 0..69 {
+        writeln!(&mut contents, "l {} {}", i + vo, i + vo + 1).unwrap();
     }
 
-    writeln!(&mut contents, "\n# Camera-space Landmarks\n#").unwrap();
+    writeln!(&mut contents, "\n# Contour\n#").unwrap();
     for &p in CONTOUR_INDICES.iter().filter_map(|&i| landmarks.get(i)) {
-        writeln!(&mut contents, "# vec2({}, {})", p.x, p.y).unwrap();
+        writeln!(&mut contents, "# vec2({}, {}),", p.x, p.y).unwrap();
     }
 
     if face.has_pose() {
-        writeln!(&mut contents, "\n# Transformed Reference Mesh").unwrap();
+        writeln!(&mut contents, "\n# Transformed Reference Mesh\no reference").unwrap();
 
         let r = face.rotation();
         let t = face.translation();
 
+        let vo = v;
         for &p in &DEFAULT_FACE {
             let p = r * p + t;
             writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
+            v += 1;
+        }
+        for i in 0..69 {
+            writeln!(&mut contents, "l {} {}", i + vo, i + vo + 1).unwrap();
+        }
+
+        writeln!(&mut contents, "\n# 3D Face\no face_3d").unwrap();
+
+        let vo = v;
+        for &p in face.face_3d() {
+            let p = r * p + t;
+            writeln!(&mut contents, "v {} {} {}", p.x, p.y, p.z).unwrap();
+            v += 1;
+        }
+        for i in 0..69 {
+            writeln!(&mut contents, "l {} {}", i + vo, i + vo + 1).unwrap();
         }
     }
 
@@ -343,4 +402,52 @@ pub fn save_obj(
     } else {
         info!("Face mesh saved to {path}");
     }
+}
+
+#[derive(Resource)]
+pub struct OsfTarget {
+    socket: UdpSocket,
+    target: SocketAddr,
+}
+
+pub fn send_packets(
+    time: Res<Time>,
+    target: Res<OsfTarget>,
+    camera: Res<CameraInfo>,
+    tracker: Res<ActiveTracker>,
+    mut buffer: Local<Vec<u8>>,
+) {
+    if tracker.0.faces().is_empty() {
+        return;
+    }
+
+    buffer.clear();
+
+    for face in tracker.0.faces() {
+        let (rx, ry, rz) = face.rotation().to_euler(EulerRot::XYZ);
+        let euler = vec3(rx, ry, rz);
+
+        let blink_left = (1. + face.features().eye_l).clamp(0., 1.);
+        let blink_right = (1. + face.features().eye_r).clamp(0., 1.);
+
+        let update = FaceUpdate {
+            timestamp: time.elapsed_secs_f64(),
+            face_id: face.id(),
+            width: camera.resolution.x as f32,
+            height: camera.resolution.y as f32,
+            success: face.is_alive(),
+            pnp_error: face.pose_error(),
+            blink_left,
+            blink_right,
+            rotation: face.rotation(),
+            rotation_euler: euler,
+            translation: face.translation(),
+            landmarks: face.landmarks(),
+            landmarks_3d: face.face_3d(),
+            features: face.features(),
+        };
+        update.write::<byteorder::LittleEndian>(&mut *buffer);
+    }
+
+    target.socket.send_to(&buffer, target.target).unwrap();
 }

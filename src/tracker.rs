@@ -191,6 +191,7 @@ pub struct PendingFace {
     pub disabled: bool,
     pub confidence: f32,
     pub centre: Vec2,
+    pub size: Vec2,
     pub bounds_min: Vec2,
     pub bounds_max: Vec2,
 }
@@ -209,6 +210,7 @@ impl PendingFace {
         self.bounds_min = min;
         self.bounds_max = max;
         self.centre = (min + max) * 0.5;
+        self.size = max - min;
     }
 }
 
@@ -301,7 +303,7 @@ impl Tracker {
         let mut tracked_faces = Vec::with_capacity(config.max_faces);
         let contour_indices = if config.model_type == TrackerModel::ModelT { &CONTOUR_INDICES_T[..] } else { &CONTOUR_INDICES };
 
-        for i in 0..config.max_faces {
+        for i in 0..(config.max_faces as u32) {
             tracked_faces.push(TrackedFace::new(i, contour_indices, config.max_feature_updates));
         }
 
@@ -730,12 +732,13 @@ impl Tracker {
             let pending = &mut self.pending_faces[idx];
             let tracked = &mut self.tracked_faces[tracked_idx];
 
-            self.face_boxes.push((pending.bounds_min, pending.bounds_max - pending.bounds_min));
+            self.face_boxes.push((pending.bounds_min, pending.size));
 
             tracked.update(
                 frame.width(),
                 frame.height(),
                 pending.centre,
+                pending.size,
                 &mut pending.landmarks,
                 now,
             );

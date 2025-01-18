@@ -7,6 +7,7 @@ edition = "2021"
 openseeface = { path = ".." }
 clap = { version = "4.5.26", features = ["derive"] }
 anyhow = "1.0.95"
+byteorder = "1.5.0"
 crossbeam-channel = "0.5.14"
 nokhwa = { version = "0.10.7", features = ["input-native", "output-threaded"] }
 bevy = "0.15.1"

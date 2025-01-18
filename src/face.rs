@@ -1,8 +1,9 @@
-use glam::{uvec2, vec2, vec3, Mat3, Vec2, Vec3};
+use std::f32::consts::PI;
+use glam::{uvec2, vec2, vec3, Mat3, Quat, Vec2, Vec3};
 use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
 
-use crate::geometry::align_points;
+use crate::geometry::{align_points, angle};
 use crate::sqpnp::{SqPnPSolution, SqPnPSolver};
 
 pub const NUM_FACE_LANDMARKS: usize = 70;
@@ -471,25 +472,31 @@ impl FeatureExtractor {
 }
 
 pub struct TrackedFace {
-    id: usize,
+    id: u32,
     alive: bool,
     has_pnp: bool,
+    pnp_error: f32,
     pnp_solver: SqPnPSolver,
     frame_count: usize,
     centre: Vec2,
+    size: Vec2,
     landmarks: Vec<(Vec2, f32)>,
     landmarks_camera: Vec<Vec2>,
     face_3d: FaceLandmarks3d,
     contour_indices: &'static [usize],
-    contour_reference_3d: Vec<Vec3>,
+    contour_3d: Vec<Vec3>,
     contour_2d: Vec<Vec2>,
     translation: Vec3,
-    rotation: Mat3,
+    rotation_matrix: Mat3,
+    rotation: Quat,
+    inv_rotation: Quat,
     features: FeatureExtractor,
+    current_features: Features,
+    base_scale: Vec2,
 }
 
 impl TrackedFace {
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> u32 {
         self.id
     }
 
@@ -499,6 +506,10 @@ impl TrackedFace {
 
     pub fn centre(&self) -> Vec2 {
         self.centre
+    }
+
+    pub fn size(&self) -> Vec2 {
+        self.size
     }
 
     pub fn landmarks(&self) -> &[(Vec2, f32)] {
@@ -513,6 +524,10 @@ impl TrackedFace {
         self.has_pnp
     }
 
+    pub fn pose_error(&self) -> f32 {
+        self.pnp_error
+    }
+
     pub fn pose_solutions(&self) -> &[SqPnPSolution] {
         self.pnp_solver.solutions()
     }
@@ -521,45 +536,73 @@ impl TrackedFace {
         self.translation
     }
 
-    pub fn rotation(&self) -> Mat3 {
+    pub fn rotation_matrix(&self) -> Mat3 {
+        self.rotation_matrix
+    }
+
+    pub fn rotation(&self) -> Quat {
         self.rotation
     }
 
+    pub fn face_3d(&self) -> &[Vec3] {
+        &self.face_3d
+    }
+
+    pub fn features(&self) -> &Features {
+        &self.current_features
+    }
+
     pub(crate) fn new(
-        id: usize,
+        id: u32,
         contour_indices: &'static [usize],
         max_feature_updates: f64,
     ) -> TrackedFace {
         let pnp_solver = SqPnPSolver::new();
         let face_3d = DEFAULT_FACE;
-        let contour_reference_3d = contour_indices.iter()
+        let contour_3d = contour_indices.iter()
             .map(|&idx| face_3d[idx])
             .collect();
 
         let features = FeatureExtractor::new(max_feature_updates);
 
+        let base_x_scale = (face_3d[0].x - face_3d[16].x
+            + face_3d[36].x - face_3d[39].x
+            + face_3d[42].x - face_3d[45].x) / 3.;
+        let base_y_scale = (face_3d[27].y - face_3d[28].y
+            + face_3d[28].y - face_3d[29].y
+            + face_3d[29].y - face_3d[30].y
+            + face_3d[30].y - face_3d[31].y) / 4.;
+        let base_scale = vec2(base_x_scale, base_y_scale);
+
         TrackedFace {
             id,
             alive: false,
             has_pnp: false,
+            pnp_error: f32::MAX,
             pnp_solver,
             centre: Vec2::ZERO,
+            size: Vec2::ZERO,
             frame_count: 0,
             landmarks: Vec::with_capacity(NUM_FACE_LANDMARKS),
             landmarks_camera: Vec::with_capacity(NUM_FACE_LANDMARKS),
             face_3d,
             contour_indices,
-            contour_reference_3d,
+            contour_3d,
             contour_2d: Vec::new(),
             translation: Vec3::ZERO,
-            rotation: Mat3::IDENTITY,
+            rotation_matrix: Mat3::IDENTITY,
+            rotation: Quat::IDENTITY,
+            inv_rotation: Quat::IDENTITY,
             features,
+            current_features: Default::default(),
+            base_scale,
         }
     }
 
     pub(crate) fn reset(&mut self) {
         self.alive = false;
         self.has_pnp = false;
+        self.pnp_error = f32::MAX;
         self.frame_count = 0;
     }
 
@@ -578,10 +621,84 @@ impl TrackedFace {
             self.landmarks.iter().map(|&(p, _)| (p * scale - offset) * vec2(1., -1.)));
     }
 
-    fn update_face_3d(&mut self) {
-        // Estimate depth
-        let inv_rotation = self.rotation.inverse();
+    fn update_eye_3d(&mut self, offset: usize, outer_index: usize) {
+        let outer_ln = self.landmarks_camera[outer_index];
+        let outer_3d = self.face_3d[outer_index];
+        let inner_index = outer_index + 3;
+        let inner_ln = self.landmarks_camera[inner_index];
+        let inner_3d = self.face_3d[inner_index];
 
+        // Update pupil 3D point.
+        let pupil_lm = self.landmarks_camera[offset];
+        let d1 = (pupil_lm - outer_ln).length();
+        let d2 = (pupil_lm - inner_ln).length();
+        let pt = (self.face_3d[outer_index] * d1 + self.face_3d[inner_index] * d2) / (d1 + d2);
+        let r = self.rotation * pt + self.translation;
+        let pupil_3d = pupil_lm.extend(1.) * r.z;
+        let pupil_3d = self.inv_rotation.mul_vec3(pupil_3d - self.translation);
+        self.face_3d[offset] = pupil_3d;
+
+        // Update eye centre.
+        let eye_centre = (inner_3d + outer_3d) * 0.5;
+        let d_corner = (inner_3d - outer_3d).length();
+        let depth = 0.385 * d_corner;
+        let eye_3d = eye_centre - Vec3::Z * depth;
+        self.face_3d[offset + 2] = eye_3d;
+    }
+
+    fn normalise_face_3d(&mut self) {
+        // Rotate face to be straight
+        let face_angle = angle(self.face_3d[30].truncate(), self.face_3d[27].truncate())
+            - PI * 0.5;
+        let m = Quat::from_rotation_z(-face_angle);
+        self.rotation *= Quat::from_rotation_z(face_angle);
+        self.face_3d.iter_mut().for_each(|p| *p = m.mul_vec3(*p));
+
+        // Scale face to match original scale
+        let x_scale = (self.face_3d[0].x - self.face_3d[16].x
+            + self.face_3d[36].x - self.face_3d[39].x
+            + self.face_3d[42].x - self.face_3d[45].x) / 3.;
+        let y_scale = (self.face_3d[27].y - self.face_3d[28].y
+            + self.face_3d[28].y - self.face_3d[29].y
+            + self.face_3d[29].y - self.face_3d[30].y
+            + self.face_3d[30].y - self.face_3d[31].y) / 4.;
+        let scale = self.base_scale / vec2(x_scale, y_scale);
+        let m = Mat3::from_diagonal(scale.extend(1.));
+        self.face_3d.iter_mut().for_each(|p| *p = m.mul_vec3(*p));
+    }
+
+    fn update_face_3d(&mut self) {
+        let r = &self.rotation;
+        let ir = &self.inv_rotation;
+        let t = self.translation;
+        let mut err = 0.;
+
+        for (index, ((p, &lm), &fp)) in self.face_3d[0..66].iter_mut()
+            .zip(&self.landmarks_camera)
+            .zip(&DEFAULT_FACE)
+            .enumerate() {
+            let rp = r.mul_vec3(fp) + t;
+            let np = lm.extend(1.) * rp.z;
+            let np = ir.mul_vec3(np - t);
+            *p = np;
+
+            if index < 17 || index == 30 {
+                let rp = rp.truncate() / rp.z;
+                err += (np.truncate() - rp).length_squared();
+            }
+        }
+
+        self.update_eye_3d(66, 36);
+        self.update_eye_3d(67, 42);
+
+        let err = (err / (2. * (self.landmarks.len() as f32))).sqrt();
+        self.pnp_error = err;
+        if err > 300. {
+            tracing::warn!("low precision pnp");
+            return;
+        }
+
+        self.normalise_face_3d();
     }
 
     pub(crate) fn update(
@@ -589,6 +706,7 @@ impl TrackedFace {
         frame_width: u32,
         frame_height: u32,
         centre: Vec2,
+        size: Vec2,
         landmarks: &mut Vec<(Vec2, f32)>,
         now: f64,
     ) {
@@ -600,13 +718,14 @@ impl TrackedFace {
 
         self.alive = true;
         self.centre = centre;
+        self.size = size;
         self.landmarks.clear();
         std::mem::swap(&mut self.landmarks, landmarks);
 
         self.update_landmarks_camera(frame_width, frame_height);
         self.update_contour();
 
-        let has_pnp = self.pnp_solver.solve(&self.contour_reference_3d, &self.contour_2d, None);
+        let has_pnp = self.pnp_solver.solve(&self.contour_3d, &self.contour_2d, None);
         self.has_pnp = has_pnp;
         if !has_pnp {
             return;
@@ -615,12 +734,15 @@ impl TrackedFace {
         let solution = self.pnp_solver.best_solution().unwrap();
         let t = solution.translation();
         let rot = solution.rotation_matrix();
+        let q = Quat::from_mat3(&rot);
         self.has_pnp = true;
         self.translation = t;
-        self.rotation = rot;
+        self.rotation_matrix = rot;
+        self.rotation = q;
+        self.inv_rotation = q.inverse();
 
         self.update_face_3d();
 
-        self.features.update(&self.face_3d, now, true);
+        self.current_features = self.features.update(&self.face_3d, now, true);
     }
 }

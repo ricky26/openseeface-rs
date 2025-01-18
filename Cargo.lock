@@ -4544,6 +4544,7 @@ dependencies = [
  "bevy",
  "bevy-inspector-egui",
  "bevy_egui",
+ "byteorder",
  "clap",
  "crossbeam-channel",
  "image",

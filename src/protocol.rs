@@ -1,9 +1,9 @@
 use std::io::Write;
 
 use byteorder::{ByteOrder, WriteBytesExt};
-use glam::{Quat, Vec3};
+use glam::{Quat, Vec2, Vec3};
 
-use crate::face::{Features, NUM_FACE_LANDMARKS};
+use crate::face::Features;
 
 pub struct FaceUpdate<'a> {
     pub timestamp: f64,
@@ -17,8 +17,8 @@ pub struct FaceUpdate<'a> {
     pub rotation: Quat,
     pub rotation_euler: Vec3,
     pub translation: Vec3,
-    pub landmarks: &'a [Vec3; NUM_FACE_LANDMARKS],
-    pub landmarks_3d: &'a [Vec3; NUM_FACE_LANDMARKS],
+    pub landmarks: &'a [(Vec2, f32)],
+    pub landmarks_3d: &'a [Vec3],
     pub features: &'a Features,
 }
 
@@ -28,10 +28,12 @@ impl FaceUpdate<'_> {
         out.write_u32::<E>(self.face_id).unwrap();
         out.write_f32::<E>(self.width).unwrap();
         out.write_f32::<E>(self.height).unwrap();
+        out.write_f32::<E>(self.blink_right).unwrap();
+        out.write_f32::<E>(self.blink_left).unwrap();
         out.write_u8(if self.success { 1 } else { 0 }).unwrap();
         out.write_f32::<E>(self.pnp_error).unwrap();
-        out.write_f32::<E>(self.rotation.x).unwrap();
         out.write_f32::<E>(self.rotation.y).unwrap();
+        out.write_f32::<E>(self.rotation.x).unwrap();
         out.write_f32::<E>(self.rotation.z).unwrap();
         out.write_f32::<E>(self.rotation.w).unwrap();
         out.write_f32::<E>(self.rotation_euler.x).unwrap();
@@ -40,10 +42,10 @@ impl FaceUpdate<'_> {
         out.write_f32::<E>(self.translation.x).unwrap();
         out.write_f32::<E>(self.translation.y).unwrap();
         out.write_f32::<E>(self.translation.z).unwrap();
-        for p in self.landmarks {
-            out.write_f32::<E>(p.z).unwrap();
+        for &(_, c) in self.landmarks {
+            out.write_f32::<E>(c).unwrap();
         }
-        for p in self.landmarks {
+        for &(p, _) in self.landmarks {
             out.write_f32::<E>(p.y).unwrap();
             out.write_f32::<E>(p.x).unwrap();
         }
