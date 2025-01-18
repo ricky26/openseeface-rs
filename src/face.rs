@@ -3,8 +3,12 @@ use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::align_points;
+use crate::sqpnp::{SqPnPSolution, SqPnPSolver};
 
-pub const DEFAULT_FACE: [Vec3; 70] = [
+pub const NUM_FACE_LANDMARKS: usize = 70;
+pub type FaceLandmarks3d = [Vec3; NUM_FACE_LANDMARKS];
+#[allow(clippy::excessive_precision)]
+pub const DEFAULT_FACE: FaceLandmarks3d = [
     vec3(0.4551769692672, 0.300895790030204, -0.764429433974752),
     vec3(0.448998827123556, 0.166995837790733, -0.765143004071253),
     vec3(0.437431554952677, 0.022655479179981, -0.739267175112735),
@@ -324,42 +328,43 @@ impl FeatureExtractor {
     fn update_eye(
         tracker: &mut FeatureTracker,
         feature: &mut f32,
-        points: &[Vec2],
+        points: &[Vec3],
         offset: usize,
         norm_distance_y: f32,
         now: f64,
     ) -> f32 {
         let mut f_pts = [
-            points[offset + 1],
-            points[offset + 2],
-            points[offset + 5],
-            points[offset + 4],
+            points[offset + 1].truncate(),
+            points[offset + 2].truncate(),
+            points[offset + 5].truncate(),
+            points[offset + 4].truncate(),
         ];
-        let a = align_points(points[offset], points[offset + 3], &mut f_pts);
+        let a = align_points(points[offset].truncate(), points[offset + 3].truncate(), &mut f_pts);
         let f = (f_pts[0].y + f_pts[1].y - f_pts[2].y - f_pts[3].y) / (2. * norm_distance_y);
         *feature = tracker.update(f, now);
         a
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_eyebrow(
         steepness_tracker: &mut FeatureTracker,
         steepness: &mut f32,
         quirk_tracker: &mut FeatureTracker,
         quirk: &mut f32,
-        points: &[Vec2],
+        points: &[Vec3],
         offset: usize,
         norm_angle: f32,
         norm_distance_y: f32,
         now: f64,
     ) {
         let mut f_pts = [
-            points[offset],
-            points[offset + 1],
-            points[offset + 2],
-            points[offset + 3],
-            points[offset + 4],
+            points[offset].truncate(),
+            points[offset + 1].truncate(),
+            points[offset + 2].truncate(),
+            points[offset + 3].truncate(),
+            points[offset + 4].truncate(),
         ];
-        let a = align_points(points[offset], points[offset + 4], &mut f_pts);
+        let a = align_points(points[offset].truncate(), points[offset + 4].truncate(), &mut f_pts);
         let f = -a.to_degrees() - norm_angle;
         *steepness = steepness_tracker.update(f, now);
         let f = f_pts[1..4]
@@ -371,7 +376,7 @@ impl FeatureExtractor {
         *quirk = quirk_tracker.update(f, now);
     }
 
-    pub fn update(&mut self, points: &[Vec2], now: f64, full: bool) -> Features {
+    pub fn update(&mut self, points: &FaceLandmarks3d, now: f64, full: bool) -> Features {
         let mut features = Features::default();
 
         let norm_distance_x = (points[0].x - points[16].x + points[1].x - points[15].x) / 2.;
@@ -395,8 +400,8 @@ impl FeatureExtractor {
         );
 
         if full {
-            let a3 = align_points(points[0], points[16], &mut []);
-            let a4 = align_points(points[31], points[35], &mut []);
+            let a3 = align_points(points[0].truncate(), points[16].truncate(), &mut []);
+            let a4 = align_points(points[31].truncate(), points[35].truncate(), &mut []);
             let norm_angle = ((a1 + a2 + a3 + a4) / 4.).to_degrees();
 
             Self::update_eyebrow(
@@ -466,17 +471,21 @@ impl FeatureExtractor {
 }
 
 pub struct TrackedFace {
-    pub(crate) id: usize,
-    pub(crate) alive: bool,
-    pub(crate) pnp: bool,
-    pub(crate) frame_count: usize,
-    pub(crate) position: Vec2,
-    pub(crate) landmarks: Vec<(Vec2, f32)>,
-    pub(crate) landmarks_camera: Vec<Vec2>,
-    pub(crate) face_3d: [Vec3; 70],
-    pub(crate) contour_2d: Vec<Vec2>,
-    pub(crate) translation: Vec3,
-    pub(crate) rotation: Mat3,
+    id: usize,
+    alive: bool,
+    has_pnp: bool,
+    pnp_solver: SqPnPSolver,
+    frame_count: usize,
+    centre: Vec2,
+    landmarks: Vec<(Vec2, f32)>,
+    landmarks_camera: Vec<Vec2>,
+    face_3d: FaceLandmarks3d,
+    contour_indices: &'static [usize],
+    contour_reference_3d: Vec<Vec3>,
+    contour_2d: Vec<Vec2>,
+    translation: Vec3,
+    rotation: Mat3,
+    features: FeatureExtractor,
 }
 
 impl TrackedFace {
@@ -488,8 +497,8 @@ impl TrackedFace {
         self.alive
     }
 
-    pub fn position(&self) -> Vec2 {
-        self.position
+    pub fn centre(&self) -> Vec2 {
+        self.centre
     }
 
     pub fn landmarks(&self) -> &[(Vec2, f32)] {
@@ -500,12 +509,12 @@ impl TrackedFace {
         &self.landmarks_camera
     }
 
-    pub(crate) fn contour_2d(&self) -> &[Vec2] {
-        &self.contour_2d
+    pub fn has_pose(&self) -> bool {
+        self.has_pnp
     }
 
-    pub fn has_pose(&self) -> bool {
-        self.pnp
+    pub fn pose_solutions(&self) -> &[SqPnPSolution] {
+        self.pnp_solver.solutions()
     }
 
     pub fn translation(&self) -> Vec3 {
@@ -516,31 +525,51 @@ impl TrackedFace {
         self.rotation
     }
 
-    pub fn new(id: usize) -> TrackedFace {
+    pub(crate) fn new(
+        id: usize,
+        contour_indices: &'static [usize],
+        max_feature_updates: f64,
+    ) -> TrackedFace {
+        let pnp_solver = SqPnPSolver::new();
         let face_3d = DEFAULT_FACE;
+        let contour_reference_3d = contour_indices.iter()
+            .map(|&idx| face_3d[idx])
+            .collect();
+
+        let features = FeatureExtractor::new(max_feature_updates);
 
         TrackedFace {
             id,
             alive: false,
-            pnp: false,
-            position: Vec2::ZERO,
+            has_pnp: false,
+            pnp_solver,
+            centre: Vec2::ZERO,
             frame_count: 0,
-            landmarks: Vec::with_capacity(70),
-            landmarks_camera: Vec::with_capacity(70),
+            landmarks: Vec::with_capacity(NUM_FACE_LANDMARKS),
+            landmarks_camera: Vec::with_capacity(NUM_FACE_LANDMARKS),
             face_3d,
+            contour_indices,
+            contour_reference_3d,
             contour_2d: Vec::new(),
             translation: Vec3::ZERO,
             rotation: Mat3::IDENTITY,
+            features,
         }
     }
 
-    pub(crate) fn update_contour(&mut self, indices: &[usize]) {
+    pub(crate) fn reset(&mut self) {
+        self.alive = false;
+        self.has_pnp = false;
+        self.frame_count = 0;
+    }
+
+    fn update_contour(&mut self) {
         self.contour_2d.clear();
-        self.contour_2d.extend(indices.iter()
+        self.contour_2d.extend(self.contour_indices.iter()
             .map(|&idx| self.landmarks_camera[idx]));
     }
 
-    pub(crate) fn update_landmarks_camera(&mut self, width: u32, height: u32) {
+    fn update_landmarks_camera(&mut self, width: u32, height: u32) {
         let size = width.min(height) as f32;
         let scale = 2. / size;
         let offset = uvec2(width, height).as_vec2() * 0.5 * scale;
@@ -549,8 +578,49 @@ impl TrackedFace {
             self.landmarks.iter().map(|&(p, _)| (p * scale - offset) * vec2(1., -1.)));
     }
 
-    pub(crate) fn reset(&mut self) {
-        self.alive = false;
-        self.pnp = false;
+    fn update_face_3d(&mut self) {
+        // Estimate depth
+        let inv_rotation = self.rotation.inverse();
+
+    }
+
+    pub(crate) fn update(
+        &mut self,
+        frame_width: u32,
+        frame_height: u32,
+        centre: Vec2,
+        landmarks: &mut Vec<(Vec2, f32)>,
+        now: f64,
+    ) {
+        if self.alive {
+            self.frame_count += 1;
+        } else {
+            self.frame_count = 1;
+        }
+
+        self.alive = true;
+        self.centre = centre;
+        self.landmarks.clear();
+        std::mem::swap(&mut self.landmarks, landmarks);
+
+        self.update_landmarks_camera(frame_width, frame_height);
+        self.update_contour();
+
+        let has_pnp = self.pnp_solver.solve(&self.contour_reference_3d, &self.contour_2d, None);
+        self.has_pnp = has_pnp;
+        if !has_pnp {
+            return;
+        }
+
+        let solution = self.pnp_solver.best_solution().unwrap();
+        let t = solution.translation();
+        let rot = solution.rotation_matrix();
+        self.has_pnp = true;
+        self.translation = t;
+        self.rotation = rot;
+
+        self.update_face_3d();
+
+        self.features.update(&self.face_3d, now, true);
     }
 }

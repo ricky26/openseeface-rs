@@ -8,35 +8,51 @@ use ndarray::{s, ArrayViewD, Axis};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
-use crate::face::{TrackedFace, DEFAULT_FACE};
+use crate::face::TrackedFace;
 use crate::geometry::{compensate, rotate};
 use crate::image::ImageArrayExt;
 use crate::retinaface::RetinaFaceDetector;
-use crate::sqpnp::SqPnPSolver;
 
-const MODEL_0: &'static [u8] = include_bytes!("../models/lm_model0_opt.onnx");
-const MODEL_1: &'static [u8] = include_bytes!("../models/lm_model1_opt.onnx");
-const MODEL_2: &'static [u8] = include_bytes!("../models/lm_model2_opt.onnx");
-const MODEL_3: &'static [u8] = include_bytes!("../models/lm_model3_opt.onnx");
-const MODEL_4: &'static [u8] = include_bytes!("../models/lm_model4_opt.onnx");
-const MODEL_T: &'static [u8] = include_bytes!("../models/lm_modelT_opt.onnx");
-const MODEL_V: &'static [u8] = include_bytes!("../models/lm_modelV_opt.onnx");
-const MODEL_U: &'static [u8] = include_bytes!("../models/lm_modelU_opt.onnx");
+const MODEL_0: &[u8] = include_bytes!("../models/lm_model0_opt.onnx");
+const MODEL_1: &[u8] = include_bytes!("../models/lm_model1_opt.onnx");
+const MODEL_2: &[u8] = include_bytes!("../models/lm_model2_opt.onnx");
+const MODEL_3: &[u8] = include_bytes!("../models/lm_model3_opt.onnx");
+const MODEL_4: &[u8] = include_bytes!("../models/lm_model4_opt.onnx");
+const MODEL_T: &[u8] = include_bytes!("../models/lm_modelT_opt.onnx");
+const MODEL_V: &[u8] = include_bytes!("../models/lm_modelV_opt.onnx");
+const MODEL_U: &[u8] = include_bytes!("../models/lm_modelU_opt.onnx");
 
-const MODEL_GAZE: &'static [u8] = include_bytes!("../models/mnv3_gaze32_split_opt.onnx");
+const MODEL_GAZE: &[u8] = include_bytes!("../models/mnv3_gaze32_split_opt.onnx");
 
-const MODEL_DETECTION: &'static [u8] = include_bytes!("../models/mnv3_detection_opt.onnx");
+const MODEL_DETECTION: &[u8] = include_bytes!("../models/mnv3_detection_opt.onnx");
 
-#[derive(Clone, Copy, Debug, PartialOrd, Ord, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialOrd, Ord, PartialEq, Eq)]
 pub enum TrackerModel {
     Model0,
     Model1,
     Model2,
+    #[default]
     Model3,
     Model4,
     ModelT,
     ModelV,
     ModelU,
+}
+
+impl TrackerModel {
+    pub fn from_i32(x: i32) -> Option<TrackerModel> {
+        match x {
+            0 => Some(TrackerModel::Model0),
+            1 => Some(TrackerModel::Model1),
+            2 => Some(TrackerModel::Model2),
+            3 => Some(TrackerModel::Model3),
+            4 => Some(TrackerModel::Model4),
+            -1 => Some(TrackerModel::ModelT),
+            -2 => Some(TrackerModel::ModelU),
+            -3 => Some(TrackerModel::ModelV),
+            _ => None,
+        }
+    }
 }
 
 fn model_data(model: TrackerModel) -> &'static [u8] {
@@ -201,9 +217,6 @@ pub struct Tracker {
     res: u32,
     out_res: u32,
     logit_factor: f32,
-    face_3d: [Vec3; 70],
-    contour_indices: &'static [usize],
-    contour_3d: Vec<Vec3>,
     retina_face_detect: RetinaFaceDetector,
     retina_face_scan: RetinaFaceDetector,
     session: Session,
@@ -224,7 +237,6 @@ pub struct Tracker {
     pending_faces: Vec<PendingFace>,
     num_pending_faces: usize,
     pending_face_indices: Vec<usize>,
-    pnp: SqPnPSolver,
 }
 
 impl Tracker {
@@ -286,15 +298,11 @@ impl Tracker {
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_DETECTION)?;
 
-        let face_3d = DEFAULT_FACE;
         let mut tracked_faces = Vec::with_capacity(config.max_faces);
         let contour_indices = if config.model_type == TrackerModel::ModelT { &CONTOUR_INDICES_T[..] } else { &CONTOUR_INDICES };
-        let contour_3d = contour_indices.iter()
-            .map(|&idx| face_3d[idx])
-            .collect();
 
         for i in 0..config.max_faces {
-            tracked_faces.push(TrackedFace::new(i));
+            tracked_faces.push(TrackedFace::new(i, contour_indices, config.max_feature_updates));
         }
 
         let (res, out_res, logit_factor) = match config.model_type {
@@ -314,16 +322,12 @@ impl Tracker {
             ..Default::default()
         }; config.max_faces];
         let pending_face_indices = Vec::with_capacity(pending_faces.len());
-        let pnp = SqPnPSolver::new();
 
         Ok(Self {
             config,
             res,
             out_res,
             logit_factor,
-            face_3d,
-            contour_indices,
-            contour_3d,
             retina_face_detect: face_detector,
             retina_face_scan: face_detector_scan,
             session,
@@ -344,7 +348,6 @@ impl Tracker {
             pending_faces,
             num_pending_faces: 0,
             pending_face_indices,
-            pnp,
         })
     }
 
@@ -489,6 +492,7 @@ impl Tracker {
         (position, c)
     }
 
+    #[allow(clippy::type_complexity)]
     fn detect_eyes(
         &mut self, frame: &Rgb32FImage, face_index: usize,
     ) -> Result<((Vec2, f32), (Vec2, f32)), ort::Error> {
@@ -502,9 +506,9 @@ impl Tracker {
         let inner_l = landmarks[45].0;
         let outer_l = landmarks[42].0;
 
-        let (pos_r, scale_r, ref_r, a_r) = self.prepare_eye(&frame, inner_r, outer_r, false);
+        let (pos_r, scale_r, ref_r, a_r) = self.prepare_eye(frame, inner_r, outer_r, false);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 0).unwrap();
-        let (pos_l, scale_l, ref_l, a_l) = self.prepare_eye(&frame, inner_l, outer_l, true);
+        let (pos_l, scale_l, ref_l, a_l) = self.prepare_eye(frame, inner_l, outer_l, true);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 32).unwrap();
 
         // self.image_prep.save(&self.eyes_scratch_32, "eyes_scratch_32.exr").unwrap();
@@ -691,7 +695,7 @@ impl Tracker {
             let min = face.bounds_min;
             let max = face.bounds_max;
 
-            if self.pending_faces.iter().any(|other| {
+            if self.pending_faces[0..i].iter().any(|other| {
                 min.cmplt(other.bounds_max).all()
                     && !max.cmpgt(other.bounds_min).any()
             }) {
@@ -712,8 +716,8 @@ impl Tracker {
                 let pending = &self.pending_faces[face_index];
 
                 for (tracked_idx, face) in tracked.iter().enumerate() {
-                    let dist2 = if face.alive {
-                        (face.position - pending.centre).length_squared()
+                    let dist2 = if face.is_alive() {
+                        (face.centre() - pending.centre).length_squared()
                     } else {
                         f32::MAX
                     };
@@ -729,44 +733,22 @@ impl Tracker {
             let pending = &mut self.pending_faces[idx];
             let tracked = &mut self.tracked_faces[tracked_idx];
 
-            if tracked.alive {
-                tracked.frame_count += 1;
-            } else {
-                tracked.frame_count = 1;
-            }
-
             self.face_boxes.push((pending.bounds_min, pending.bounds_max - pending.bounds_min));
 
-            tracked.alive = true;
-            tracked.position = pending.centre;
-            std::mem::swap(&mut tracked.landmarks, &mut pending.landmarks);
-            pending.landmarks.clear();
-
-            tracked.update_landmarks_camera(frame.width(), frame.height());
-            tracked.update_contour(self.contour_indices);
-
-            if self.pnp.solve(&self.contour_3d, tracked.contour_2d(), None) {
-                if self.pnp.solutions().len() > 1 {
-                    tracing::warn!("multiple PnP solutions!");
-                }
-
-                let solution = self.pnp.best_solution().unwrap();
-                let t = solution.translation();
-                let rot = solution.rotation_matrix();
-                tracked.pnp = true;
-                tracked.translation = t;
-                tracked.rotation = rot;
-            } else {
-                tracked.pnp = false;
-            }
+            tracked.update(
+                frame.width(),
+                frame.height(),
+                pending.centre,
+                &mut pending.landmarks,
+                now,
+            );
 
             self.tracked_faces.swap(self.num_tracked_faces, tracked_idx);
             self.num_tracked_faces += 1;
         }
 
         for face in &mut self.tracked_faces[self.num_tracked_faces..] {
-            face.alive = false;
-            face.frame_count = 0;
+            face.reset();
         }
 
         Ok(())

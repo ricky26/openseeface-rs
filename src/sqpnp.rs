@@ -1,3 +1,11 @@
+//! Implementation of SQPnP perspective-n-point algorithm.
+//!
+//! This can be used to determine the pose of a 3D object given two sets of
+//! corresponding points: a set of 3D points from the object and a set of
+//! 2D projected points (often from an image).
+//!
+//! See the C++ implementation for more information about SQPnP:
+//! [terzakig/sqpnp](https://github.com/terzakig/sqpnp).
 // Based on existing Rust & C++ implementations:
 // - https://github.com/powei-lin/sqpnp_simple/blob/main/src/lib.rs
 // - https://github.com/terzakig/sqpnp/blob/master/sqpnp/sqpnp.cpp
@@ -88,6 +96,10 @@ fn orthogonality_error(x: &NMat3) -> Float {
         + 2. * dab * dab * dac * dac * dbc * dbc
 }
 
+/// A possible PnP solution.
+///
+/// Care should be taken to check that the error returned from
+/// [`SqPnPSolution::sq_error()`] is acceptable.
 #[derive(Clone, Debug, Default)]
 pub struct SqPnPSolution {
     rotation: NVec9,
@@ -97,6 +109,8 @@ pub struct SqPnPSolution {
 }
 
 impl SqPnPSolution {
+    /// A rotation matrix that will rotate points from the reference object
+    /// into 3D space which will line up with the projected points.
     pub fn rotation_matrix(&self) -> Mat3 {
         let mat = vec9_to_mat3(&self.rotation);
         let mat: SMatrix<f32, 3, 3> = convert(mat);
@@ -104,15 +118,19 @@ impl SqPnPSolution {
         mat
     }
 
+    /// A translation to apply along with the rotation to transform reference
+    /// object points such that they match the projection points.
     pub fn translation(&self) -> Vec3 {
         let t: SVector<f32, 3> = convert(self.translation);
         t.into()
     }
 
+    /// The current iteration count when this solution was generated.
     pub fn num_iterations(&self) -> usize {
         self.num_iterations
     }
 
+    /// The square of the solution error.
     pub fn sq_error(&self) -> Float {
         self.sq_error
     }
@@ -161,6 +179,7 @@ impl SqPnPSolution {
     }
 }
 
+/// Parameters used by the SQPnP algorithm.
 pub trait SqPnPParameters {
     const RANK_TOLERANCE: Float;
     const SQP_SQUARED_TOLERANCE: Float;
@@ -175,16 +194,20 @@ pub trait SqPnPParameters {
     fn eigen_vectors(m: &NMat9) -> (NMat9, NVec9);
 }
 
+/// Calculate the nearest rotation matrix to `m` using SVD.
 pub fn nearest_rotation_matrix_svd(m: &NMat3) -> NMat3 {
     let svd = m.svd(true, true);
     let u = svd.u.unwrap();
     let v_t = svd.v_t.unwrap();
     let det_uv = u.determinant() * v_t.determinant();
     let diagonal = NVec3::new(1., 1., det_uv);
-    let r = u * Matrix::from_diagonal(&diagonal) * v_t;
-    r
+    u * Matrix::from_diagonal(&diagonal) * v_t
 }
 
+/// Calculate the nearest rotation matrix to `m` using an algorithm derived
+/// from the FOAM algorithm.
+///
+/// This is faster than [`nearest_rotation_matrix_svd`] but is not as accurate.
 pub fn nearest_rotation_matrix_foam(m: &NMat3) -> NMat3 {
     let det = m.determinant();
     if det.abs() < 1e-4 {
@@ -228,10 +251,13 @@ pub fn nearest_rotation_matrix_foam(m: &NMat3) -> NMat3 {
     let a = l * l + lm;
     let denom = l * (l * l - lm) - 2. * det;
     let denom = denom.recip();
-    let r = ((a * m) + 2. * (l * n - o)) * denom;
-    r
+    ((a * m) + 2. * (l * n - o)) * denom
 }
 
+/// Generate Eigen vectors, and initial Eigen values given the omega matrix,
+/// using QR decomposition.
+///
+/// This is faster than [`eigen_vectors_svd`], but less accurate.
 pub fn eigen_vectors_rrqr(m: &NMat9) -> (NMat9, NVec9) {
     let qr = m.col_piv_qr();
     let q = qr.q();
@@ -239,6 +265,8 @@ pub fn eigen_vectors_rrqr(m: &NMat9) -> (NMat9, NVec9) {
     (q, r)
 }
 
+/// Generate Eigen vectors, and initial Eigen values given the omega matrix,
+/// using SVD.
 pub fn eigen_vectors_svd(m: &NMat9) -> (NMat9, NVec9) {
     let svd = m.svd(true, false);
     let u = svd.u.unwrap();
@@ -246,6 +274,7 @@ pub fn eigen_vectors_svd(m: &NMat9) -> (NMat9, NVec9) {
     (u, s)
 }
 
+/// Default parameters for the SQPnP algorithm.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultSqPnPParameters;
 
@@ -271,6 +300,9 @@ impl SqPnPParameters for DefaultSqPnPParameters {
     }
 }
 
+/// A SQPnP solver.
+///
+/// This struct can be stored to minimise memory allocations used for solutions.
 #[derive(Clone, Debug)]
 pub struct SqPnPSolver<P = DefaultSqPnPParameters> {
     _parameters: PhantomData<P>,
@@ -287,10 +319,12 @@ impl<P> Default for SqPnPSolver<P> {
 }
 
 impl<P: SqPnPParameters> SqPnPSolver<P> {
+    /// A list of all found solutions during the previous call to [`Self::solve()`].
     pub fn solutions(&self) -> &[SqPnPSolution] {
         &self.solutions
     }
 
+    /// Get the best stored solution from the previous call to [`Self::solve()`].
     pub fn best_solution(&self) -> Option<&SqPnPSolution> {
         self.solutions.iter()
             .fold(None, |best, next| {
@@ -306,12 +340,13 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
             })
     }
 
+    /// Create a new SQPnP solver.
     pub fn new() -> SqPnPSolver<P> {
         SqPnPSolver::default()
     }
 
     fn nearest_rotation_matrix(r: &NVec9) -> NVec9 {
-        mat3_to_vec9(&P::nearest_rotation_matrix(&vec9_to_mat3(&r)))
+        mat3_to_vec9(&P::nearest_rotation_matrix(&vec9_to_mat3(r)))
     }
 
     fn handle_solution(
@@ -777,10 +812,7 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
             0., sum_w, -sum_w_proj.y,
             -sum_w_proj.x, -sum_w_proj.y, sum_w_proj_len_sq,
         );
-        let Some(q_inv) = q.try_inverse() else {
-            return None;
-        };
-
+        let q_inv = q.try_inverse()?;
         let p = -q_inv * qa;
         omega += qa.transpose() * p;
 
@@ -788,6 +820,18 @@ impl<P: SqPnPParameters> SqPnPSolver<P> {
         Some((omega, p, mean))
     }
 
+    /// Solve a given PnP problem.
+    ///
+    /// - `points_3d` should contain a series of points in object space.
+    /// - `points_2d` should contain a series of projected points in
+    ///   camera space (i.e. centred on 0,0).
+    /// - `weights` can optionally contain a list of weights determining which
+    ///   points to prioritise correctness for in solutions.
+    ///
+    /// All three slices must be the same length. At least 4 points must be provided.
+    ///
+    /// Returns true if any solution was found. Care should be taken because the
+    /// solution might still be imperfect.
     pub fn solve(
         &mut self,
         points_3d: &[Vec3],
@@ -942,7 +986,7 @@ mod tests {
             max_d2 = d2.max(max_d2);
 
             if d2 > 0.5 {
-                assert!(false, "point {index} too far, expected {a} got {b} (t={s_t} r={rx},{ry},{rz} ({r}))");
+                panic!("point {index} too far, expected {a} got {b} (t={s_t} r={rx},{ry},{rz} ({r}))");
             }
         }
 

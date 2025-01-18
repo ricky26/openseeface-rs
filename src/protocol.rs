@@ -1,23 +1,9 @@
 use std::io::Write;
+
 use byteorder::{ByteOrder, WriteBytesExt};
 use glam::{Quat, Vec3};
 
-pub const ALL_FEATURES: [&'static str; 14] = [
-    "eye_l",
-    "eye_r",
-    "eyebrow_steepness_l",
-    "eyebrow_updown_l",
-    "eyebrow_quirk_l",
-    "eyebrow_steepness_r",
-    "eyebrow_updown_r",
-    "eyebrow_quirk_r",
-    "mouth_corner_updown_l",
-    "mouth_corner_inout_l",
-    "mouth_corner_updown_r",
-    "mouth_corner_inout_r",
-    "mouth_open",
-    "mouth_wide",
-];
+use crate::face::{Features, NUM_FACE_LANDMARKS};
 
 pub struct FaceUpdate<'a> {
     pub timestamp: f64,
@@ -31,9 +17,9 @@ pub struct FaceUpdate<'a> {
     pub rotation: Quat,
     pub rotation_euler: Vec3,
     pub translation: Vec3,
-    pub landmarks: &'a [Vec3],
-    pub landmarks_3d: &'a [Vec3],
-    pub features: &'a [f32],
+    pub landmarks: &'a [Vec3; NUM_FACE_LANDMARKS],
+    pub landmarks_3d: &'a [Vec3; NUM_FACE_LANDMARKS],
+    pub features: &'a Features,
 }
 
 impl FaceUpdate<'_> {
@@ -66,8 +52,19 @@ impl FaceUpdate<'_> {
             out.write_f32::<E>(-p.y).unwrap();
             out.write_f32::<E>(-p.z).unwrap();
         }
-        for &f in self.features {
-            out.write_f32::<E>(f).unwrap();
-        }
+        out.write_f32::<E>(self.features.eye_l).unwrap();
+        out.write_f32::<E>(self.features.eye_r).unwrap();
+        out.write_f32::<E>(self.features.eyebrow_updown_l).unwrap();
+        out.write_f32::<E>(self.features.eyebrow_updown_r).unwrap();
+        out.write_f32::<E>(self.features.eyebrow_quirk_l).unwrap();
+        out.write_f32::<E>(self.features.eyebrow_quirk_r).unwrap();
+        out.write_f32::<E>(self.features.eyebrow_steepness_l).unwrap();
+        out.write_f32::<E>(self.features.eyebrow_steepness_r).unwrap();
+        out.write_f32::<E>(self.features.mouth_corner_updown_l).unwrap();
+        out.write_f32::<E>(self.features.mouth_corner_updown_r).unwrap();
+        out.write_f32::<E>(self.features.mouth_corner_inout_l).unwrap();
+        out.write_f32::<E>(self.features.mouth_corner_inout_r).unwrap();
+        out.write_f32::<E>(self.features.mouth_open).unwrap();
+        out.write_f32::<E>(self.features.mouth_wide).unwrap();
     }
 }

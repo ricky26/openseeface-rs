@@ -1,6 +1,6 @@
 use std::fmt::Write;
 use std::time::Instant;
-
+use anyhow::anyhow;
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
 use bevy::color::palettes::css::{LIME, YELLOW};
@@ -20,23 +20,36 @@ use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatTyp
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::DEFAULT_FACE;
-use openseeface::tracker::{Tracker, TrackerConfig, CONTOUR_INDICES};
+use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
 
 pub mod inspector;
 
 #[derive(Parser)]
 struct Options {
-    #[arg(long, help = "List available webcams")]
-    pub list: bool,
+    #[arg(short, long, help = "List available video sources")]
+    pub list_cameras: bool,
 
     #[arg(short, long, help = "Camera index to use for tracking")]
     pub camera: Option<u32>,
+
+    #[arg(short = 'm', long, help = "Maximum number of threads to use")]
+    pub max_threads: Option<usize>,
+
+    #[arg(short = 'f', long, default_value="1", help = "Maximum number of faces to detect")]
+    pub max_faces: usize,
+
+    #[arg(long = "use-retinaface", help = "Use RetinaFace for face detection")]
+    pub use_retina_face: bool,
+
+    #[arg(long, default_value = "3", help = "Pick face tracking model to use")]
+    pub model: i32,
 }
+
 
 fn main() -> anyhow::Result<()> {
     let opts = Options::parse();
 
-    if opts.list {
+    if opts.list_cameras {
         let cameras = nokhwa::query(ApiBackend::Auto)?;
         for camera in &cameras {
             info!("Camera {}: {}", camera.index(), camera.human_name());
@@ -60,9 +73,16 @@ fn main() -> anyhow::Result<()> {
         },
     )?;
 
-    let config = TrackerConfig {
+    let mut config = TrackerConfig {
+        use_retina_face: opts.use_retina_face,
+        model_type: TrackerModel::from_i32(opts.model)
+            .ok_or_else(|| anyhow!("invalid model type '{}'", opts.model))?,
         ..Default::default()
     };
+
+    if let Some(max_threads) = opts.max_threads {
+        config.max_threads = max_threads;
+    }
 
     let camera_format = camera.camera_format()?;
     info!("Starting camera stream {}", camera_format);
@@ -115,9 +135,14 @@ fn main_plugin(app: &mut App) {
     app
         .add_systems(Startup, setup)
         .add_systems(Update, (
-            handle_new_camera_frames.run_if(input_toggle_active(true, KeyCode::F6)),
-            draw_detections,
-            draw_landmarks,
+            (
+                handle_new_camera_frames.run_if(input_toggle_active(true, KeyCode::F6)),
+                (
+                    draw_detections,
+                    draw_landmarks,
+                    draw_reference_face.run_if(input_toggle_active(false, KeyCode::F3)),
+                ),
+            ).chain(),
             save_obj.run_if(input_just_pressed(KeyCode::F10)),
         ));
 }
@@ -213,7 +238,7 @@ pub fn handle_new_camera_frames(
         };
 
         let rgba: RgbaImage = image.convert();
-        texture.data.copy_from_slice(&rgba.as_raw());
+        texture.data.copy_from_slice(rgba.as_raw());
         materials.get_mut(&camera_material.0);
     }
 }
@@ -256,15 +281,24 @@ pub fn draw_landmarks(
             let c = Color::hsv(c * 270., 1., 1.);
             gizmos.sphere(p, 0.01, c);
         }
+    }
+}
 
-        if face.has_pose() {
-            let r = face.rotation();
-            let t = face.translation();
+pub fn draw_reference_face(
+    mut gizmos: Gizmos,
+    tracker: Res<ActiveTracker>,
+) {
+    for face in tracker.0.faces() {
+        if !face.has_pose() {
+            continue;
+        }
 
-            for &p in &DEFAULT_FACE {
-                let p = (r * p + t) * vec3(-0.4, 0.4, -1.0);
-                gizmos.sphere(p, 0.01, YELLOW);
-            }
+        let r = face.rotation();
+        let t = face.translation();
+
+        for &p in &DEFAULT_FACE {
+            let p = (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
+            gizmos.sphere(p, 0.01, YELLOW);
         }
     }
 }

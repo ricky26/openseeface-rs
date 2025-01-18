@@ -6,8 +6,8 @@ use ndarray::Array1;
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
-const DEFAULT_MODEL: &'static [u8] = include_bytes!("../models/retinaface_640x640_opt.onnx");
-const DEFAULT_JSON: &'static [u8] = include_bytes!("../models/priorbox_640x640.json");
+const DEFAULT_MODEL: &[u8] = include_bytes!("../models/retinaface_640x640_opt.onnx");
+const DEFAULT_JSON: &[u8] = include_bytes!("../models/priorbox_640x640.json");
 
 static PRIORS: LazyLock<Vec<Vec4>> = LazyLock::new(|| {
     serde_json::from_slice(DEFAULT_JSON).expect("default retinaface JSON should be valid")
