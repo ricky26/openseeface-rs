@@ -1,6 +1,9 @@
+use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
+use anyhow::anyhow;
 use clap::Parser;
+use glam::{vec3, EulerRot};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::CallbackCamera;
@@ -9,15 +12,32 @@ use tracing::{info, span, Level};
 use tracing_subscriber::{EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use openseeface::tracker::{Tracker, TrackerConfig};
+
+use openseeface::protocol::FaceUpdate;
+use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel};
 
 #[derive(Parser)]
 struct Options {
-    #[arg(long, help = "List available webcams")]
-    pub list: bool,
+    #[arg(short, long, help = "List available video sources")]
+    pub list_cameras: bool,
 
     #[arg(short, long, help = "Camera index to use for tracking")]
     pub camera: Option<u32>,
+
+    #[arg(short = 'm', long, help = "Maximum number of threads to use")]
+    pub max_threads: Option<usize>,
+
+    #[arg(short = 'f', long, default_value="1", help = "Maximum number of faces to detect")]
+    pub max_faces: usize,
+
+    #[arg(long = "use-retinaface", help = "Use RetinaFace for face detection")]
+    pub use_retina_face: bool,
+
+    #[arg(long, default_value = "3", help = "Pick face tracking model to use")]
+    pub model: i32,
+
+    #[arg(short, long, default_value = "127.0.0.1:11573", help = "Address to send OpenSeeFace packets to")]
+    pub address: String,
 }
 
 fn init_tracing() {
@@ -41,17 +61,65 @@ fn init_tracing() {
     subscriber.init();
 }
 
+#[tracing::instrument(skip_all)]
+fn send_packet(
+    time: f64,
+    width: f32,
+    height: f32,
+    tracker: &Tracker,
+    socket: &UdpSocket,
+    target: &SocketAddr,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<()> {
+    if tracker.faces().is_empty() {
+        return Ok(());
+    }
+
+    buffer.clear();
+
+    for face in tracker.faces() {
+        let (rx, ry, rz) = face.rotation().to_euler(EulerRot::XYZ);
+        let euler = vec3(rx, ry, rz);
+
+        let blink_left = (1. + face.features().eye_l).clamp(0., 1.);
+        let blink_right = (1. + face.features().eye_r).clamp(0., 1.);
+
+        let update = FaceUpdate {
+            timestamp: time,
+            face_id: face.id(),
+            width,
+            height,
+            success: face.is_alive(),
+            pnp_error: face.pose_error(),
+            blink_left,
+            blink_right,
+            rotation: face.rotation(),
+            rotation_euler: euler,
+            translation: face.translation(),
+            landmarks: face.landmarks(),
+            landmarks_3d: face.face_3d(),
+            features: face.features(),
+        };
+        update.write::<byteorder::LittleEndian>(&mut *buffer);
+    }
+
+    socket.send_to(&buffer, target)?;
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     init_tracing();
     let opts = Options::parse();
 
-    if opts.list {
+    if opts.list_cameras {
         let cameras = nokhwa::query(ApiBackend::Auto)?;
         for camera in &cameras {
             info!("Camera {}: {}", camera.index(), camera.human_name());
         }
         return Ok(());
     }
+
+    let target = opts.address.parse()?;
 
     let camera_index = opts.camera.unwrap_or(0);
     let requested_format =
@@ -65,13 +133,23 @@ fn main() -> anyhow::Result<()> {
         frame_tx_clone.send(Some(buffer)).ok();
     })?;
 
-    let config = TrackerConfig {
+    let mut config = TrackerConfig {
+        use_retina_face: opts.use_retina_face,
+        model_type: TrackerModel::from_i32(opts.model)
+            .ok_or_else(|| anyhow!("invalid model type '{}'", opts.model))?,
         ..Default::default()
     };
+
+    if let Some(max_threads) = opts.max_threads {
+        config.max_threads = max_threads;
+    }
 
     ctrlc::set_handler(move || {
         frame_tx.send(None).ok();
     })?;
+
+    let socket = UdpSocket::bind("127.0.0.1:0")?;
+    info!("Sending OSF protocol to {}", &opts.address);
 
     let camera_format = camera.camera_format()?;
     info!("Starting camera stream {}", camera_format);
@@ -79,6 +157,9 @@ fn main() -> anyhow::Result<()> {
 
     let mut tracker = Tracker::new(config)?;
     let epoch = Instant::now();
+    let width = camera_format.width() as f32;
+    let height = camera_format.height() as f32;
+    let mut buffer = Vec::new();
     while let Ok(Some(frame)) = frame_rx.recv() {
         let span = span!(Level::DEBUG, "frame");
         let _span = span.enter();
@@ -87,8 +168,10 @@ fn main() -> anyhow::Result<()> {
         let now64 = (now - epoch).as_secs_f64();
 
         let image = span!(Level::DEBUG, "decode").in_scope(|| frame.decode_image::<RgbFormat>())?;
-        let image = image.convert();
+        let image = span!(Level::DEBUG, "convert").in_scope(|| image.convert());
         tracker.detect(&image, now64)?;
+
+        send_packet(now64, width, height, &tracker, &socket, &target, &mut buffer)?;
 
         #[cfg(feature = "tracing")]
         tracing::event!(Level::DEBUG, message = "frame end", tracy.frame_mark = true);
