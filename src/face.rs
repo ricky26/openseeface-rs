@@ -1,10 +1,9 @@
-use std::f32::consts::PI;
 use glam::{uvec2, vec2, vec3, Mat3, Quat, Vec2, Vec3};
 use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
-
-use crate::geometry::{align_points, angle};
 use sqpnp::{SqPnPSolution, SqPnPSolver};
+
+use crate::geometry::align_points;
 
 pub const NUM_FACE_LANDMARKS: usize = 70;
 pub type FaceLandmarks3d = [Vec3; NUM_FACE_LANDMARKS];
@@ -565,7 +564,8 @@ pub struct TrackedFace {
     frame_count: usize,
     centre: Vec2,
     size: Vec2,
-    landmarks: Vec<(Vec2, f32)>,
+    landmark_confidence: Vec<f32>,
+    landmarks_image: Vec<Vec2>,
     landmarks_camera: Vec<Vec2>,
     face_3d: FaceLandmarks3d,
     contour_indices: &'static [usize],
@@ -577,7 +577,6 @@ pub struct TrackedFace {
     inv_rotation: Quat,
     features: FeatureExtractor,
     current_features: Features,
-    base_scale: Vec2,
 }
 
 impl TrackedFace {
@@ -597,8 +596,12 @@ impl TrackedFace {
         self.size
     }
 
-    pub fn landmarks(&self) -> &[(Vec2, f32)] {
-        &self.landmarks
+    pub fn landmark_confidence(&self) -> &[f32] {
+        &self.landmark_confidence
+    }
+
+    pub fn landmarks_image(&self) -> &[Vec2] {
+        &self.landmarks_image
     }
 
     pub fn landmarks_camera(&self) -> &[Vec2] {
@@ -650,15 +653,6 @@ impl TrackedFace {
 
         let features = FeatureExtractor::new(max_feature_updates);
 
-        let base_x_scale = (face_3d[0].x - face_3d[16].x
-            + face_3d[36].x - face_3d[39].x
-            + face_3d[42].x - face_3d[45].x) / 3.;
-        let base_y_scale = (face_3d[27].y - face_3d[28].y
-            + face_3d[28].y - face_3d[29].y
-            + face_3d[29].y - face_3d[30].y
-            + face_3d[30].y - face_3d[31].y) / 4.;
-        let base_scale = vec2(base_x_scale, base_y_scale);
-
         TrackedFace {
             id,
             alive: false,
@@ -668,7 +662,8 @@ impl TrackedFace {
             centre: Vec2::ZERO,
             size: Vec2::ZERO,
             frame_count: 0,
-            landmarks: Vec::with_capacity(NUM_FACE_LANDMARKS),
+            landmark_confidence: Vec::with_capacity(NUM_FACE_LANDMARKS),
+            landmarks_image: Vec::with_capacity(NUM_FACE_LANDMARKS),
             landmarks_camera: Vec::with_capacity(NUM_FACE_LANDMARKS),
             face_3d,
             contour_indices,
@@ -680,7 +675,6 @@ impl TrackedFace {
             inv_rotation: Quat::IDENTITY,
             features,
             current_features: Default::default(),
-            base_scale,
         }
     }
 
@@ -699,11 +693,12 @@ impl TrackedFace {
 
     fn update_landmarks_camera(&mut self, width: u32, height: u32) {
         let size = width.min(height) as f32;
-        let scale = 2. / size;
+        let scale = 1. / size;
         let offset = uvec2(width, height).as_vec2() * 0.5 * scale;
         self.landmarks_camera.clear();
         self.landmarks_camera.extend(
-            self.landmarks.iter().map(|&(p, _)| (p * scale - offset) * vec2(1., -1.)));
+            self.landmarks_image.iter()
+                .map(|&p| (p * scale - offset) * vec2(0.5, -0.5)));
     }
 
     fn update_eye_3d(&mut self, offset: usize, outer_index: usize) {
@@ -731,59 +726,39 @@ impl TrackedFace {
         self.face_3d[offset + 2] = eye_3d;
     }
 
-    fn normalise_face_3d(&mut self) {
-        // Rotate face to be straight
-        let face_angle = angle(self.face_3d[30].truncate(), self.face_3d[27].truncate())
-            - PI * 0.5;
-        let m = Quat::from_rotation_z(-face_angle);
-        self.rotation *= Quat::from_rotation_z(face_angle);
-        self.face_3d.iter_mut().for_each(|p| *p = m.mul_vec3(*p));
-
-        // Scale face to match original scale
-        let x_scale = (self.face_3d[0].x - self.face_3d[16].x
-            + self.face_3d[36].x - self.face_3d[39].x
-            + self.face_3d[42].x - self.face_3d[45].x) / 3.;
-        let y_scale = (self.face_3d[27].y - self.face_3d[28].y
-            + self.face_3d[28].y - self.face_3d[29].y
-            + self.face_3d[29].y - self.face_3d[30].y
-            + self.face_3d[30].y - self.face_3d[31].y) / 4.;
-        let scale = self.base_scale / vec2(x_scale, y_scale);
-        let m = Mat3::from_diagonal(scale.extend(1.));
-        self.face_3d.iter_mut().for_each(|p| *p = m.mul_vec3(*p));
-    }
-
     fn update_face_3d(&mut self) {
         let r = &self.rotation;
         let ir = &self.inv_rotation;
         let t = self.translation;
+        let z_plane = r.mul_vec3(Vec3::Z);
+        let c0 = z_plane.dot(t);
         let mut err = 0.;
 
         for (index, ((p, &lm), &fp)) in self.face_3d[0..66].iter_mut()
             .zip(&self.landmarks_camera)
             .zip(&DEFAULT_FACE)
             .enumerate() {
-            let rp = r.mul_vec3(fp) + t;
-            let np = lm.extend(1.) * rp.z;
+            let c = fp.z + c0;
+            let np = lm.extend(1.);
+            let cp = z_plane.dot(np);
+            let z = c / cp;
+            let np = np * z;
             let np = ir.mul_vec3(np - t);
             *p = np;
 
             if index < 17 || index == 30 {
+                let rp = r.mul_vec3(fp) + t;
                 let rp = rp.truncate() / rp.z;
-                err += (np.truncate() - rp).length_squared();
+                let np = np.truncate() / np.z;
+                err += (np - rp).length_squared();
             }
         }
 
         self.update_eye_3d(66, 36);
         self.update_eye_3d(67, 42);
 
-        let err = (err / (2. * (self.landmarks.len() as f32))).sqrt();
+        let err = (err / (2. * (self.landmarks_image.len() as f32))).sqrt();
         self.pnp_error = err;
-        if err > 300. {
-            tracing::warn!("low precision pnp");
-            return;
-        }
-
-        self.normalise_face_3d();
     }
 
     pub(crate) fn update(
@@ -792,7 +767,8 @@ impl TrackedFace {
         frame_height: u32,
         centre: Vec2,
         size: Vec2,
-        landmarks: &mut Vec<(Vec2, f32)>,
+        confidence: &mut Vec<f32>,
+        landmarks: &mut Vec<Vec2>,
         now: f64,
     ) {
         if self.alive {
@@ -804,8 +780,10 @@ impl TrackedFace {
         self.alive = true;
         self.centre = centre;
         self.size = size;
-        self.landmarks.clear();
-        std::mem::swap(&mut self.landmarks, landmarks);
+        self.landmark_confidence.clear();
+        self.landmarks_image.clear();
+        std::mem::swap(&mut self.landmark_confidence, confidence);
+        std::mem::swap(&mut self.landmarks_image, landmarks);
 
         self.update_landmarks_camera(frame_width, frame_height);
         self.update_contour();

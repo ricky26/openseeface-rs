@@ -40,8 +40,8 @@ struct Options {
     #[arg(short = 'f', long, default_value="1", help = "Maximum number of faces to detect")]
     pub max_faces: usize,
 
-    #[arg(long = "use-retinaface", help = "Use RetinaFace for face detection")]
-    pub use_retina_face: bool,
+    #[arg(long, help = "Use RetinaFace for face detection")]
+    pub use_retinaface: bool,
 
     #[arg(long, default_value = "3", help = "Pick face tracking model to use")]
     pub model: i32,
@@ -79,7 +79,7 @@ fn main() -> anyhow::Result<()> {
     )?;
 
     let mut config = TrackerConfig {
-        use_retina_face: opts.use_retina_face,
+        use_retinaface: opts.use_retinaface,
         model_type: TrackerModel::from_i32(opts.model)
             .ok_or_else(|| anyhow!("invalid model type '{}'", opts.model))?,
         ..Default::default()
@@ -133,6 +133,7 @@ fn main() -> anyhow::Result<()> {
         .add(camera_image);
 
     app
+        .init_resource::<TrackingUpdated>()
         .insert_resource(Epoch(epoch))
         .insert_resource(ActiveTracker(tracker))
         .insert_resource(CameraFrameRx(frame_rx))
@@ -153,10 +154,10 @@ fn main_plugin(app: &mut App) {
             (
                 handle_new_camera_frames.run_if(input_toggle_active(true, KeyCode::F6)),
                 (
-                    draw_detections,
-                    draw_landmarks,
+                    draw_detections.run_if(input_toggle_active(false, KeyCode::F1)),
+                    draw_landmarks.run_if(input_toggle_active(false, KeyCode::F2)),
                     draw_reference_face.run_if(input_toggle_active(false, KeyCode::F3)),
-                    draw_face_3d.run_if(input_toggle_active(false, KeyCode::F4)),
+                    draw_face_3d.run_if(input_toggle_active(true, KeyCode::F4)),
                 ),
             ).chain(),
             send_packets.run_if(resource_exists::<OsfTarget>),
@@ -225,6 +226,10 @@ pub struct CameraInfo {
     pub resolution: UVec2,
 }
 
+#[derive(Clone, Debug, Default, Deref, DerefMut, Resource)]
+pub struct TrackingUpdated(pub bool);
+
+#[allow(clippy::too_many_arguments)]
 fn handle_new_camera_frames(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -233,7 +238,10 @@ fn handle_new_camera_frames(
     epoch: Res<Epoch>,
     frame_rx: Res<CameraFrameRx>,
     mut tracker: ResMut<ActiveTracker>,
+    mut updated: ResMut<TrackingUpdated>,
 ) {
+    **updated = false;
+
     if let Ok(frame) = frame_rx.0.try_recv() {
         let span = span!(Level::DEBUG, "frame");
         let _span = span.enter();
@@ -258,6 +266,7 @@ fn handle_new_camera_frames(
         let rgba: RgbaImage = image.convert();
         texture.data.copy_from_slice(rgba.as_raw());
         materials.get_mut(&camera_material.0);
+        **updated = true;
     }
 }
 
@@ -293,19 +302,22 @@ fn draw_landmarks(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
-    let scale = vec3(-0.4, 0.4, 1.) * 4.9;
+    let landmarks_z = -4.5;
+    let camera_z = -1.2;
+    let scale = (landmarks_z / camera_z) * vec3(-2., 2., 1.);
+
     for face in tracker.0.faces() {
         let landmarks_camera = face.landmarks_camera();
 
-        for (&(_, c), &p) in face.landmarks().iter().zip(landmarks_camera) {
-            let p = p.extend(-1.) * scale;
+        for (&p, &c) in landmarks_camera.iter().zip(face.landmark_confidence()) {
+            let p = p.extend(camera_z) * scale;
             let c = Color::hsv(c * 270., 1., 1.);
             gizmos.sphere(p, 0.01, c);
         }
 
         for &(a, b) in &FACE_EDGES[..(FACE_EDGES.len() - 2)] {
-            let pa = landmarks_camera[a].extend(-1.) * scale;
-            let pb = landmarks_camera[b].extend(-1.) * scale;
+            let pa = landmarks_camera[a].extend(camera_z) * scale;
+            let pb = landmarks_camera[b].extend(camera_z) * scale;
             gizmos.line(pa, pb, DARK_BLUE);
         }
     }
@@ -324,7 +336,7 @@ fn draw_reference_face(
         let t = face.translation();
 
         let transform_point = move |p|
-            (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
+            (r * p + t) * vec3(-1., 1., -0.6);
 
         for &p in &DEFAULT_FACE {
             let p = transform_point(p);
@@ -352,17 +364,18 @@ fn draw_face_3d(
         let r = face.rotation();
         let t = face.translation();
         let transform_point = move |p|
-            (r * p + t) * vec3(-1., 1., -1.) - Vec3::Z * t.z * 2.;
+            (r * p + t) * vec3(-1., 1., -0.6);
 
-        for &p in face_3d {
+        for (&p, &c) in face_3d.iter().zip(face.landmark_confidence()) {
             let p = transform_point(p);
-            gizmos.sphere(p, 0.01, ORANGE);
+            let c = Color::hsv(c * 270., 1., 1.);
+            gizmos.sphere(p, 0.01, c);
         }
 
         for &(a, b) in &FACE_EDGES {
             let pa = transform_point(face_3d[a]);
             let pb = transform_point(face_3d[b]);
-            gizmos.line(pa, pb, YELLOW);
+            gizmos.line(pa, pb, ORANGE);
         }
     }
 }
@@ -465,9 +478,10 @@ fn send_packets(
     target: Res<OsfTarget>,
     camera: Res<CameraInfo>,
     tracker: Res<ActiveTracker>,
+    updated: Res<TrackingUpdated>,
     mut buffer: Local<Vec<u8>>,
 ) {
-    if tracker.0.faces().is_empty() {
+    if !**updated || tracker.0.faces().is_empty() {
         return;
     }
 
@@ -492,7 +506,8 @@ fn send_packets(
             rotation: face.rotation(),
             rotation_euler: euler,
             translation: face.translation(),
-            landmarks: face.landmarks(),
+            landmark_confidence: face.landmark_confidence(),
+            landmarks: face.landmarks_image(),
             landmarks_3d: face.face_3d(),
             features: face.features(),
         };

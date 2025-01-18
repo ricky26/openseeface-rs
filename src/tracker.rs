@@ -149,7 +149,7 @@ pub struct TrackerConfig {
     pub bbox_growth: f32,
     pub max_threads: usize,
     pub no_gaze: bool,
-    pub use_retina_face: bool,
+    pub use_retinaface: bool,
     pub use_internal_face_detection: bool,
     pub assume_fullscreen_face: bool,
     pub max_feature_updates: f64,
@@ -170,7 +170,7 @@ impl Default for TrackerConfig {
             bbox_growth: 0.0,
             max_threads: 4,
             no_gaze: false,
-            use_retina_face: false,
+            use_retinaface: false,
             use_internal_face_detection: true,
             assume_fullscreen_face: false,
             max_feature_updates: 0.0,
@@ -182,7 +182,8 @@ impl Default for TrackerConfig {
 
 #[derive(Clone, Debug, Default)]
 pub struct PendingFace {
-    pub landmarks: Vec<(Vec2, f32)>,
+    pub landmark_confidence: Vec<f32>,
+    pub landmarks: Vec<Vec2>,
     pub disabled: bool,
     pub confidence: f32,
     pub centre: Vec2,
@@ -194,7 +195,7 @@ pub struct PendingFace {
 impl PendingFace {
     fn update_bounds(&mut self) {
         let (min, max) = self.landmarks.iter()
-            .fold(None, |acc, &(p, _)| {
+            .fold(None, |acc, &p| {
                 if let Some((min, max)) = acc {
                     Some((p.min(min), p.max(max)))
                 } else {
@@ -214,12 +215,11 @@ pub struct Tracker {
     res: u32,
     out_res: u32,
     logit_factor: f32,
-    retina_face_detect: RetinaFaceDetector,
-    retina_face_scan: RetinaFaceDetector,
-    session: Session,
-    sessions: Vec<Session>,
-    gaze_session: Session,
-    face_detect: Session,
+    retinaface_detect: RetinaFaceDetector,
+    retinaface_scan: RetinaFaceDetector,
+    landmark_model: Session,
+    gaze_model: Session,
+    detect_model: Session,
     face_detect_224: Rgb32FImage,
     face_scratch_res: Rgb32FImage,
     eye_scratch_32: Rgb32FImage,
@@ -264,13 +264,13 @@ impl Tracker {
     pub fn new(
         config: TrackerConfig,
     ) -> Result<Tracker, ort::Error> {
-        let face_detector = RetinaFaceDetector::new(
+        let retinaface_detect = RetinaFaceDetector::new(
             config.max_threads.max(4),
             0.4,
             0.4,
             config.max_faces,
         )?;
-        let face_detector_scan = RetinaFaceDetector::new(
+        let retinaface_scan = RetinaFaceDetector::new(
             2,
             0.4,
             0.4,
@@ -278,31 +278,16 @@ impl Tracker {
         )?;
 
         let model_data = model_data(config.model_type);
-        let session = Session::builder()?
+        let landmark_model = Session::builder()?
             .with_inter_threads(1)?
             .with_intra_threads(config.max_threads.min(4))?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
             .commit_from_memory(model_data)?;
-
-        let max_workers = config.max_threads.min(config.max_faces).max(1);
-        let threads_per_worker = (config.max_threads / max_workers).max(1);
-        let extra_threads = config.max_threads % max_workers;
-        let mut sessions = Vec::with_capacity(max_workers);
-        for i in 0..max_workers {
-            let num_threads = threads_per_worker + if i < extra_threads { 1 } else { 0 };
-            let session = Session::builder()?
-                .with_inter_threads(1)?
-                .with_intra_threads(num_threads)?
-                .with_optimization_level(GraphOptimizationLevel::Level3)?
-                .commit_from_memory(model_data)?;
-            sessions.push(session);
-        }
-
-        let gaze_session = Session::builder()?
+        let gaze_model = Session::builder()?
             .with_inter_threads(1)?
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_GAZE)?;
-        let gaze_detection = Session::builder()?
+        let detect_model = Session::builder()?
             .with_inter_threads(1)?
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_DETECTION)?;
@@ -337,12 +322,11 @@ impl Tracker {
             res,
             out_res,
             logit_factor,
-            retina_face_detect: face_detector,
-            retina_face_scan: face_detector_scan,
-            session,
-            sessions,
-            gaze_session,
-            face_detect: gaze_detection,
+            retinaface_detect,
+            retinaface_scan,
+            landmark_model,
+            gaze_model,
+            detect_model,
             face_detect_224,
             face_scratch_res,
             eye_scratch_32,
@@ -366,7 +350,7 @@ impl Tracker {
         let input = self.face_detect_224.as_view()
             .insert_axis(Axis(0))
             .permuted_axes((0, 3, 1, 2));
-        let output = self.face_detect.run(ort::inputs![input]?)?;
+        let output = self.detect_model.run(ort::inputs![input]?)?;
         let max_pool = output["maxpool"].try_extract_tensor::<f32>()?;
         let output = output["output"].try_extract_tensor::<f32>()?;
 
@@ -402,18 +386,21 @@ impl Tracker {
     }
 
     fn prepare_eye(
-        &mut self, frame: &Rgb32FImage, inner: Vec2, outer: Vec2, flip: bool,
-    ) -> (Vec2, Mat2, Vec2, f32) {
+        &mut self,
+        frame: &Rgb32FImage,
+        inner: Vec2,
+        outer: Vec2,
+        flip: bool,
+    ) -> (Vec2, Mat2) {
         let out_size = 32.;
         let half_out = out_size * 0.5;
 
         let angle = angle(outer, inner);
         let center = (outer + inner) / 2.;
         let eye_size = (outer - inner).length();
-        let src_size = vec2(1.4, 1.2) * eye_size;
-        let half_size = src_size * 0.5;
+        let src_size = vec2(1.6, 1.2) * eye_size;
         let base_scale = out_size / src_size;
-        let tl = center - Vec2::from_angle(-angle).rotate(half_size);
+        let tl = center - Vec2::from_angle(-angle).rotate(src_size * 0.5);
         let m = Mat2::from_scale_angle(1. / base_scale, -angle);
         let mut scale = base_scale;
         if flip {
@@ -424,36 +411,7 @@ impl Tracker {
             * Projection::rotate(-angle)
             * Projection::translate(-center.x, -center.y);
         self.image_prep.prepare_image_warp(&mut self.eye_scratch_32, frame, &projection);
-        (tl, m, outer, angle)
-    }
-
-    fn extract_face<'a>(
-        &mut self, frame: &'a Rgb32FImage, face_index: usize,
-    ) -> (Vec2, SubImage<&'a Rgb32FImage>) {
-        let face = &self.pending_faces[face_index];
-        let (min, max) = face.landmarks.iter()
-            .copied()
-            .fold(None, |acc, (p, _)| {
-                if let Some((min, max)) = acc {
-                    Some((p.min(min), p.max(max)))
-                } else {
-                    Some((p, p))
-                }
-            })
-            .unwrap();
-        let half_size = (max - min) * 0.6;
-        let center = (min + max) * 0.5;
-
-        let min = center - half_size;
-        let max = center + half_size;
-
-        let size = uvec2(frame.width(), frame.height()).as_vec2();
-        let min_safe = min.clamp(Vec2::ZERO, size).as_uvec2();
-        let max_safe = max.clamp(Vec2::ZERO, size).as_uvec2();
-        let size_safe = max_safe - min_safe;
-
-        let face_frame = frame.view(min_safe.x, min_safe.y, size_safe.x, size_safe.y);
-        (min_safe.as_vec2(), face_frame)
+        (tl, m)
     }
 
     fn process_eye(
@@ -462,8 +420,6 @@ impl Tracker {
         index: usize,
         offset: Vec2,
         m: Mat2,
-        outer: Vec2,
-        angle: f32,
     ) -> (Vec2, f32) {
         let t_c = results.slice(s![index, 0, .., ..]);
         let (x, y, c) = t_c.indexed_iter()
@@ -504,14 +460,14 @@ impl Tracker {
         }
 
         let landmarks = &self.pending_faces[face_index].landmarks;
-        let inner_r = landmarks[39].0;
-        let outer_r = landmarks[36].0;
-        let inner_l = landmarks[45].0;
-        let outer_l = landmarks[42].0;
+        let inner_r = landmarks[39];
+        let outer_r = landmarks[36];
+        let inner_l = landmarks[45];
+        let outer_l = landmarks[42];
 
-        let (pos_r, m_r, ref_r, a_r) = self.prepare_eye(frame, inner_r, outer_r, false);
+        let (pos_r, m_r) = self.prepare_eye(frame, inner_r, outer_r, false);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 0).unwrap();
-        let (pos_l, m_l, ref_l, a_l) = self.prepare_eye(frame, inner_l, outer_l, true);
+        let (pos_l, m_l) = self.prepare_eye(frame, inner_l, outer_l, true);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 32).unwrap();
 
         let input = self.eyes_scratch_32.as_view()
@@ -519,11 +475,11 @@ impl Tracker {
             .into_shape_with_order((2, 32, 32, 3))
             .unwrap()
             .permuted_axes((0, 3, 1, 2));
-        let outputs = self.gaze_session.run(ort::inputs![input]?)?;
+        let outputs = self.gaze_model.run(ort::inputs![input]?)?;
         let results = outputs[0].try_extract_tensor::<f32>()?;
 
-        let eye_r = self.process_eye(&results, 0, pos_r, m_r, ref_r, a_r);
-        let eye_l = self.process_eye(&results, 1, pos_l, m_l, ref_l, a_l);
+        let eye_r = self.process_eye(&results, 0, pos_r, m_r);
+        let eye_l = self.process_eye(&results, 1, pos_l, m_l);
         Ok((eye_r, eye_l))
     }
 
@@ -539,7 +495,7 @@ impl Tracker {
         let input = self.face_scratch_res.as_view()
             .insert_axis(Axis(0))
             .permuted_axes((0, 3, 1, 2));
-        let outputs = self.session.run(ort::inputs![input]?)?;
+        let outputs = self.landmark_model.run(ort::inputs![input]?)?;
         let result = outputs[0]
             .try_extract_tensor::<f32>()?;
 
@@ -587,7 +543,8 @@ impl Tracker {
             }
 
             total_c += c;
-            face.landmarks.push((off, c));
+            face.landmark_confidence.push(c);
+            face.landmarks.push(off);
         }
 
         let avg_c = total_c / (face.landmarks.len() as f32);
@@ -603,8 +560,8 @@ impl Tracker {
 
         let existing_face_count = self.face_boxes.len();
         if self.face_boxes.is_empty() {
-            if self.config.use_retina_face {
-                self.retina_face_detect.detect(frame, &mut self.face_boxes)?;
+            if self.config.use_retinaface {
+                self.retinaface_detect.detect(frame, &mut self.face_boxes)?;
             }
 
             if self.config.use_internal_face_detection {
@@ -620,8 +577,8 @@ impl Tracker {
         } else if self.face_boxes.len() >= self.config.max_faces {
             self.wait_count = 0;
         } else if self.wait_count >= self.config.scan_every {
-            if self.config.use_retina_face {
-                self.retina_face_scan.detect(frame, &mut self.face_boxes)?;
+            if self.config.use_retinaface {
+                self.retinaface_scan.detect(frame, &mut self.face_boxes)?;
             }
 
             if self.config.use_internal_face_detection {
@@ -671,13 +628,13 @@ impl Tracker {
             }
 
             self.num_pending_faces += 1;
-            let (eye_r, eye_l) = self.detect_eyes(frame, index)?;
+            let ((eye_r, c_r), (eye_l, c_l)) = self.detect_eyes(frame, index)?;
 
             let face = &mut self.pending_faces[index];
             face.disabled = false;
             face.confidence = c;
-            face.landmarks.push(eye_r);
-            face.landmarks.push(eye_l);
+            face.landmark_confidence.extend([c_r, c_l]);
+            face.landmarks.extend([eye_r, eye_l]);
             face.update_bounds();
         }
         self.crops = crops;
@@ -742,6 +699,7 @@ impl Tracker {
                 frame.height(),
                 pending.centre,
                 pending.size,
+                &mut pending.landmark_confidence,
                 &mut pending.landmarks,
                 now,
             );

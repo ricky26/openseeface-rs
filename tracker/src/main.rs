@@ -30,8 +30,8 @@ struct Options {
     #[arg(short = 'f', long, default_value="1", help = "Maximum number of faces to detect")]
     pub max_faces: usize,
 
-    #[arg(long = "use-retinaface", help = "Use RetinaFace for face detection")]
-    pub use_retina_face: bool,
+    #[arg(long, help = "Use RetinaFace for face detection")]
+    pub use_retinaface: bool,
 
     #[arg(long, default_value = "3", help = "Pick face tracking model to use")]
     pub model: i32,
@@ -96,14 +96,15 @@ fn send_packet(
             rotation: face.rotation(),
             rotation_euler: euler,
             translation: face.translation(),
-            landmarks: face.landmarks(),
+            landmark_confidence: face.landmark_confidence(),
+            landmarks: face.landmarks_image(),
             landmarks_3d: face.face_3d(),
             features: face.features(),
         };
         update.write::<byteorder::LittleEndian>(&mut *buffer);
     }
 
-    socket.send_to(&buffer, target)?;
+    socket.send_to(buffer, target)?;
     Ok(())
 }
 
@@ -134,7 +135,7 @@ fn main() -> anyhow::Result<()> {
     })?;
 
     let mut config = TrackerConfig {
-        use_retina_face: opts.use_retina_face,
+        use_retinaface: opts.use_retinaface,
         model_type: TrackerModel::from_i32(opts.model)
             .ok_or_else(|| anyhow!("invalid model type '{}'", opts.model))?,
         ..Default::default()

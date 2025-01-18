@@ -17,7 +17,8 @@ pub struct FaceUpdate<'a> {
     pub rotation: Quat,
     pub rotation_euler: Vec3,
     pub translation: Vec3,
-    pub landmarks: &'a [(Vec2, f32)],
+    pub landmark_confidence: &'a [f32],
+    pub landmarks: &'a [Vec2],
     pub landmarks_3d: &'a [Vec3],
     pub features: &'a Features,
 }
@@ -42,10 +43,10 @@ impl FaceUpdate<'_> {
         out.write_f32::<E>(self.translation.x).unwrap();
         out.write_f32::<E>(self.translation.y).unwrap();
         out.write_f32::<E>(self.translation.z).unwrap();
-        for &(_, c) in self.landmarks {
+        for &c in self.landmark_confidence {
             out.write_f32::<E>(c).unwrap();
         }
-        for &(p, _) in self.landmarks {
+        for &p in self.landmarks {
             out.write_f32::<E>(p.y).unwrap();
             out.write_f32::<E>(p.x).unwrap();
         }
