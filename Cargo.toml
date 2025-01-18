@@ -4,21 +4,42 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-byteorder = "1.5.0"
-tracing = "0.1.41"
-serde = { version = "1.0.217", features = ["derive"] }
-serde_json = "1.0.135"
-glam = { version = "0.29.2", features = ["serde"] }
-ndarray = { version = "0.16.1", features = ["serde"] }
-ort = { version = "2.0.0-rc.9", features = ["ndarray"] }
-remedian = "0.1.0"
-similari = "0.26.2"
-image = "0.25.5"
-imageproc = "0.25.0"
-sqpnp = "0.1.0"
+byteorder = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+glam = { workspace = true, features = ["serde"] }
+ndarray = { workspace = true, features = ["serde"] }
+ort = { workspace = true, features = ["ndarray"] }
+remedian = { workspace = true }
+similari = { workspace = true }
+image = { workspace = true }
+imageproc = { workspace = true }
+sqpnp = { workspace = true }
 
 [workspace]
 members = [
     "demo",
     "tracker"
 ]
+
+[workspace.dependencies]
+anyhow = "1.0.95"
+clap = "4.5.26"
+byteorder = "1.5.0"
+tracing = "0.1.41"
+tracing-subscriber = "0.3.19"
+tracing-tracy = "0.11.4"
+serde = "1.0.217"
+serde_json = "1.0.135"
+glam = "0.29.2"
+ndarray = "0.16.1"
+ort = "2.0.0-rc.9"
+remedian = "0.1.0"
+similari = "0.26.2"
+image = "0.25.5"
+imageproc = "0.25.0"
+sqpnp = "0.1.0"
+crossbeam-channel = "0.5.14"
+ctrlc = "3.4.5"
+nokhwa = "0.10.7"
