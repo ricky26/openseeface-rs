@@ -511,8 +511,6 @@ impl Tracker {
         let (pos_l, scale_l, ref_l, a_l) = self.prepare_eye(frame, inner_l, outer_l, true);
         self.eyes_scratch_32.copy_from(&self.eye_scratch_32, 0, 32).unwrap();
 
-        // self.image_prep.save(&self.eyes_scratch_32, "eyes_scratch_32.exr").unwrap();
-
         let input = self.eyes_scratch_32.as_view()
             .insert_axis(Axis(0))
             .into_shape_with_order((2, 32, 32, 3))
@@ -535,7 +533,6 @@ impl Tracker {
         let crop_size = max - min;
         let crop = frame.view(min.x, min.y, crop_size.x, crop_size.y);
         self.image_prep.prepare_sub_image(&mut self.face_scratch_res, &crop);
-        // self.image_prep.save(&self.face_scratch_res, "face_scratch_res.exr").unwrap();
         let input = self.face_scratch_res.as_view()
             .insert_axis(Axis(0))
             .permuted_axes((0, 3, 1, 2));
