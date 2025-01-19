@@ -1,7 +1,7 @@
 use std::fmt::Write;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
 use bevy::color::palettes::css::{DARK_BLUE, LIME, ORANGE, YELLOW};
@@ -17,7 +17,7 @@ use clap::Parser;
 use image::buffer::ConvertBuffer;
 use image::{Rgb, RgbaImage};
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
@@ -35,6 +35,9 @@ struct Options {
 
     #[arg(short, long, help = "Camera index to use for tracking")]
     pub camera: Option<u32>,
+
+    #[arg(short, long, help = "Camera resolution to use")]
+    pub resolution: Option<String>,
 
     #[arg(short = 'm', long, help = "Maximum number of threads to use")]
     pub max_threads: Option<usize>,
@@ -65,8 +68,20 @@ fn main() -> anyhow::Result<()> {
     }
 
     let camera_index = opts.camera.unwrap_or(0);
-    let requested_format =
+    let mut requested_format =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+
+    if let Some(s) = opts.resolution.as_ref() {
+        let Some((ws, hs)) = s.split_once('x') else {
+            bail!("Invalid resolution {s}")
+        };
+
+        let w = ws.parse()?;
+        let h = hs.parse()?;
+        let resolution = Resolution::new(w, h);
+        requested_format = RequestedFormat::new::<RgbFormat>(
+            RequestedFormatType::HighestResolution(resolution));
+    }
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
     let frame_tx_clone = frame_tx.clone();
@@ -76,24 +91,21 @@ fn main() -> anyhow::Result<()> {
         move |buffer| {
             let span = span!(Level::DEBUG, "camera frame");
             let _span = span.enter();
-            frame_tx_clone.send(buffer).ok();
+            frame_tx_clone.try_send(buffer).ok();
         },
     )?;
 
     let mut config = TrackerConfig {
-        use_retinaface: opts.use_retinaface,
         model_type: TrackerModel::from_i32(opts.model)
             .ok_or_else(|| anyhow!("invalid model type '{}'", opts.model))?,
+        max_faces: opts.max_faces,
+        use_retinaface: opts.use_retinaface,
         ..Default::default()
     };
 
     if let Some(max_threads) = opts.max_threads {
         config.max_threads = max_threads;
     }
-
-    let camera_format = camera.camera_format()?;
-    info!("Starting camera stream {}", camera_format);
-    camera.open_stream()?;
 
     let tracker = Tracker::new(config)?;
     let epoch = Instant::now();
@@ -108,6 +120,10 @@ fn main() -> anyhow::Result<()> {
             features::plugin,
             main_plugin,
         ));
+
+    let camera_format = camera.camera_format()?;
+    info!("Starting camera stream {}", camera_format);
+    camera.open_stream()?;
 
     if let Some(target) = opts.address.as_ref() {
         let target = target.parse()

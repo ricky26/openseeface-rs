@@ -1,10 +1,10 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use clap::Parser;
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
+use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::CallbackCamera;
 use image::buffer::ConvertBuffer;
 use tracing::{info, span, Level};
@@ -22,6 +22,9 @@ struct Options {
 
     #[arg(short, long, help = "Camera index to use for tracking")]
     pub camera: Option<u32>,
+
+    #[arg(short, long, help = "Camera resolution to use")]
+    pub resolution: Option<String>,
 
     #[arg(short = 'm', long, help = "Maximum number of threads to use")]
     pub max_threads: Option<usize>,
@@ -100,15 +103,27 @@ fn main() -> anyhow::Result<()> {
     let target = opts.address.parse()?;
 
     let camera_index = opts.camera.unwrap_or(0);
-    let requested_format =
+    let mut requested_format =
         RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
+
+    if let Some(s) = opts.resolution.as_ref() {
+        let Some((ws, hs)) = s.split_once('x') else {
+            bail!("Invalid resolution {s}")
+        };
+
+        let w = ws.parse()?;
+        let h = hs.parse()?;
+        let resolution = Resolution::new(w, h);
+        requested_format = RequestedFormat::new::<RgbFormat>(
+            RequestedFormatType::HighestResolution(resolution));
+    }
 
     let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
     let frame_tx_clone = frame_tx.clone();
     let mut camera = CallbackCamera::new(CameraIndex::Index(camera_index), requested_format, move |buffer| {
         let span = span!(Level::DEBUG, "camera frame");
         let _span = span.enter();
-        frame_tx_clone.send(Some(buffer)).ok();
+        frame_tx_clone.try_send(Some(buffer)).ok();
     })?;
 
     let mut config = TrackerConfig {
