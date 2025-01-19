@@ -26,6 +26,8 @@ use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES
 
 pub mod inspector;
 
+pub mod features;
+
 #[derive(Parser)]
 struct Options {
     #[arg(short, long, help = "List available video sources")]
@@ -103,6 +105,7 @@ fn main() -> anyhow::Result<()> {
             DefaultInspectorConfigPlugin,
             bevy_egui::EguiPlugin,
             inspector::plugin,
+            features::plugin,
             main_plugin,
         ));
 
@@ -538,7 +541,7 @@ fn dump_debug_images(
                 let src_size = max - min;
                 let scale = out_size / src_size;
                 let rgb = Rgb([0.0, 0.0, 1.0]);
-                for (&p, &c) in face.landmarks_image().iter().zip(face.landmark_confidence()) {
+                for &p in face.landmarks_image() {
                     let p2 = (p - min) * scale;
                     let up = p2.as_uvec2();
                     image.put_pixel(up.x, up.y, rgb);

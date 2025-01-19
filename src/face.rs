@@ -424,7 +424,7 @@ impl FeatureExtractor {
             points[offset + 5].truncate(),
             points[offset + 4].truncate(),
         ];
-        let a = align_points(points[offset].truncate(), points[offset + 3].truncate(), &mut f_pts);
+        let a = align_points(points[offset + 3].truncate(), points[offset].truncate(), &mut f_pts);
         let f = (f_pts[0].y + f_pts[1].y - f_pts[2].y - f_pts[3].y) / (2. * norm_distance_y);
         *feature = tracker.update(f, now);
         a
