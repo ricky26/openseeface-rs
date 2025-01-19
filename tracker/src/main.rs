@@ -3,7 +3,6 @@ use std::time::Instant;
 
 use anyhow::anyhow;
 use clap::Parser;
-use glam::{vec3, EulerRot};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
 use nokhwa::CallbackCamera;
@@ -78,7 +77,7 @@ fn send_packet(
     buffer.clear();
 
     for face in tracker.faces() {
-        let update = FaceUpdate::from_tracked_face(face, time);
+        let update = FaceUpdate::from_tracked_face(face, width, height, time);
         update.write::<byteorder::LittleEndian>(&mut *buffer);
     }
 
