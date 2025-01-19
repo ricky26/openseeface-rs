@@ -17,7 +17,17 @@ image = { workspace = true }
 imageproc = { workspace = true }
 sqpnp = { workspace = true }
 
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."openseeface"]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [workspace]
+resolver = "2"
 members = [
     "demo",
     "tracker"
