@@ -78,29 +78,7 @@ fn send_packet(
     buffer.clear();
 
     for face in tracker.faces() {
-        let (rx, ry, rz) = face.rotation().to_euler(EulerRot::XYZ);
-        let euler = vec3(rx, ry, rz);
-
-        let blink_left = (1. + face.features().eye_l).clamp(0., 1.);
-        let blink_right = (1. + face.features().eye_r).clamp(0., 1.);
-
-        let update = FaceUpdate {
-            timestamp: time,
-            face_id: face.id(),
-            width,
-            height,
-            success: face.is_alive(),
-            pnp_error: face.pose_error(),
-            blink_left,
-            blink_right,
-            rotation: face.rotation(),
-            rotation_euler: euler,
-            translation: face.translation(),
-            landmark_confidence: face.landmark_confidence(),
-            landmarks: face.landmarks_image(),
-            landmarks_3d: face.face_3d(),
-            features: face.features(),
-        };
+        let update = FaceUpdate::from_tracked_face(face, time);
         update.write::<byteorder::LittleEndian>(&mut *buffer);
     }
 

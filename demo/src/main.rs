@@ -491,29 +491,12 @@ fn send_packets(
     buffer.clear();
 
     for face in tracker.0.faces() {
-        let (rx, ry, rz) = face.rotation().to_euler(EulerRot::XYZ);
-        let euler = vec3(rx, ry, rz);
-
-        let blink_left = (1. + face.features().eye_l).clamp(0., 1.);
-        let blink_right = (1. + face.features().eye_r).clamp(0., 1.);
-
-        let update = FaceUpdate {
-            timestamp: time.elapsed_secs_f64(),
-            face_id: face.id(),
-            width: camera.resolution.x as f32,
-            height: camera.resolution.y as f32,
-            success: face.is_alive(),
-            pnp_error: face.pose_error(),
-            blink_left,
-            blink_right,
-            rotation: face.rotation(),
-            rotation_euler: euler,
-            translation: face.translation(),
-            landmark_confidence: face.landmark_confidence(),
-            landmarks: face.landmarks_image(),
-            landmarks_3d: face.face_3d(),
-            features: face.features(),
-        };
+        let update = FaceUpdate::from_tracked_face(
+            face,
+            camera.resolution.x as f32,
+            camera.resolution.y as f32,
+            time.elapsed_secs_f64(),
+        );
         update.write::<byteorder::LittleEndian>(&mut *buffer);
     }
 

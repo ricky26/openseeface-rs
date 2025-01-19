@@ -3,7 +3,14 @@ use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
 use sqpnp::{SqPnPSolution, SqPnPSolver};
 
-use crate::geometry::align_points;
+fn align_points(a: Vec2, b: Vec2, points: &mut [Vec2]) -> f32 {
+    let angle = (b - a).to_angle();
+    let rot = Vec2::from_angle(-angle);
+    for point in points {
+        *point = a + rot.rotate(*point - a);
+    }
+    angle
+}
 
 pub const NUM_FACE_LANDMARKS: usize = 70;
 pub type FaceLandmarks3d = [Vec3; NUM_FACE_LANDMARKS];

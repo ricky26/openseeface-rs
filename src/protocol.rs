@@ -1,9 +1,9 @@
 use std::io::Write;
 
 use byteorder::{ByteOrder, WriteBytesExt};
-use glam::{Quat, Vec2, Vec3};
+use glam::{vec3, EulerRot, Quat, Vec2, Vec3};
 
-use crate::face::Features;
+use crate::face::{Features, TrackedFace};
 
 pub struct FaceUpdate<'a> {
     pub timestamp: f64,
@@ -69,5 +69,31 @@ impl FaceUpdate<'_> {
         out.write_f32::<E>(self.features.mouth_corner_inout_r).unwrap();
         out.write_f32::<E>(self.features.mouth_open).unwrap();
         out.write_f32::<E>(self.features.mouth_wide).unwrap();
+    }
+
+    pub fn from_tracked_face(face: &TrackedFace, width: f32, height: f32, time: f64) -> FaceUpdate {
+        let (rx, ry, rz) = face.rotation().to_euler(EulerRot::XYZ);
+        let euler = vec3(rx, ry, rz);
+
+        let blink_left = (1. + face.features().eye_l).clamp(0., 1.);
+        let blink_right = (1. + face.features().eye_r).clamp(0., 1.);
+
+        FaceUpdate {
+            timestamp: time,
+            face_id: face.id(),
+            width,
+            height,
+            success: face.is_alive(),
+            pnp_error: face.pose_error(),
+            blink_left,
+            blink_right,
+            rotation: face.rotation(),
+            rotation_euler: euler,
+            translation: face.translation(),
+            landmark_confidence: face.landmark_confidence(),
+            landmarks: face.landmarks_image(),
+            landmarks_3d: face.face_3d(),
+            features: face.features(),
+        }
     }
 }
