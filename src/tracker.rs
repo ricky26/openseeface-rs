@@ -506,7 +506,7 @@ impl Tracker {
         };
 
         let res_1 = (self.res - 1) as f32;
-        let res_scale = (self.res as f32) / (self.out_res as f32);
+        let res_scale = res_1 / ((self.out_res - 1) as f32);
         let t_c = result.slice(s![0, 0..c0, .., ..]);
         let t_y = result.slice(s![0, c0..c1, .., ..]);
         let t_x = result.slice(s![0, c1..c2, .., ..]);
@@ -538,8 +538,8 @@ impl Tracker {
             let y_off = t_y[[index, y, x]];
             let x_off = res_1 * logit(x_off, self.logit_factor);
             let y_off = res_1 * logit(y_off, self.logit_factor);
-            let x_off = min.x + scale.x * (res_scale * (x as f32) + x_off + 0.5) * 1.05;
-            let y_off = min.y + scale.y * (res_scale * (y as f32) + y_off + 0.5) * 1.05;
+            let x_off = min.x + scale.x * (res_scale * (x as f32) + x_off + 0.5);
+            let y_off = min.y + scale.y * (res_scale * (y as f32) + y_off + 0.5);
             let off = vec2(x_off, y_off);
 
             if self.config.model_type == TrackerModel::ModelT {
