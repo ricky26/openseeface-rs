@@ -412,7 +412,6 @@ impl TrackedFace {
         let t = solution.translation();
         let rot = solution.rotation_matrix();
         let q = Quat::from_mat3(&rot);
-        self.has_pnp = true;
         self.translation = t;
         self.rotation_matrix = rot;
         self.rotation = q;
