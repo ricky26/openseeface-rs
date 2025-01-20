@@ -117,11 +117,11 @@ fn update_ui(
     feature_ui: Single<&FeaturesUi>,
     mut nodes: Query<&mut Node, With<FeatureElement>>,
 ) {
-    let Some(face) = tracker.0.faces().last() else {
+    let Some(index) = tracker.tracker.faces().iter().rposition(|f| f.is_alive()) else {
         return;
     };
 
-    let features = face.features();
+    let features = &tracker.features.current_features()[index];
     let feature_list = [
         features.eye_l,
         features.eye_r,

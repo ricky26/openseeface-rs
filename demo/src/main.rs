@@ -21,6 +21,7 @@ use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatTyp
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
+use openseeface::features::openseeface::TrackerFeatures;
 use openseeface::protocol::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
 
@@ -108,6 +109,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let tracker = Tracker::new(config)?;
+    let features = TrackerFeatures::new(tracker.faces().len(), 0.);
     let epoch = Instant::now();
     let mut app = App::default();
     app
@@ -151,10 +153,15 @@ fn main() -> anyhow::Result<()> {
         .resource_mut::<Assets<Image>>()
         .add(camera_image);
 
+    let active_tracker = ActiveTracker {
+        tracker,
+        features,
+    };
+
     app
         .init_resource::<TrackingUpdated>()
         .insert_resource(Epoch(epoch))
-        .insert_resource(ActiveTracker(tracker))
+        .insert_resource(active_tracker)
         .insert_resource(CameraFrameRx(frame_rx))
         .insert_resource(CameraImage(camera_image))
         .insert_resource(CameraInfo {
@@ -232,7 +239,10 @@ pub struct Epoch(Instant);
 pub struct CameraFrameRx(crossbeam_channel::Receiver<Buffer>);
 
 #[derive(Resource)]
-pub struct ActiveTracker(Tracker);
+pub struct ActiveTracker {
+    pub tracker: Tracker,
+    pub features: TrackerFeatures,
+}
 
 #[derive(Clone, Debug, Resource)]
 pub struct CameraImage(Handle<Image>);
@@ -274,9 +284,13 @@ fn handle_new_camera_frames(
             .in_scope(|| frame.decode_image::<RgbFormat>())
             .expect("camera frame should be decodable");
         let image = image.convert();
-        if let Err(err) = tracker.0.detect(&image, now64) {
+        let tracker = &mut *tracker;
+        if let Err(err) = tracker.tracker.detect(&image) {
             warn!("failed to track frame: {err}");
         }
+
+        let faces = tracker.tracker.faces();
+        tracker.features.update(faces, now64);
 
         let span = span!(Level::DEBUG, "upload texture");
         let _span = span.enter();
@@ -304,7 +318,7 @@ fn draw_detections(
     };
 
     let color = LIME;
-    for &(min, size) in tracker.0.face_boxes() {
+    for &(min, size) in tracker.tracker.face_detections() {
         let max = min + size;
         let a = transform_point(vec2(min.x, min.y));
         let b = transform_point(vec2(max.x, min.y));
@@ -326,7 +340,7 @@ fn draw_landmarks(
     let camera_z = -1.25;
     let scale = (landmarks_z / camera_z) * vec3(-2., 2., 1.);
 
-    for face in tracker.0.faces() {
+    for face in tracker.tracker.visible_faces() {
         let landmarks_camera = face.landmarks_camera();
         for (&p, &c) in landmarks_camera.iter().zip(face.landmark_confidence()) {
             let p = p.extend(camera_z) * scale;
@@ -346,7 +360,7 @@ fn draw_reference_face(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
-    for face in tracker.0.faces() {
+    for face in tracker.tracker.visible_faces() {
         if !face.has_pose() {
             continue;
         }
@@ -374,7 +388,7 @@ fn draw_face_3d(
     mut gizmos: Gizmos,
     tracker: Res<ActiveTracker>,
 ) {
-    for face in tracker.0.faces() {
+    for face in tracker.tracker.visible_faces() {
         if !face.has_pose() {
             continue;
         }
@@ -402,7 +416,7 @@ fn draw_face_3d(
 fn save_obj(
     tracker: Res<ActiveTracker>,
 ) {
-    let Some(face) = tracker.0.faces().first() else {
+    let Some(face) = tracker.tracker.visible_faces().last() else {
         warn!("No visible face, obj not saved");
         return;
     };
@@ -500,15 +514,21 @@ fn send_packets(
     updated: Res<TrackingUpdated>,
     mut buffer: Local<Vec<u8>>,
 ) {
-    if !**updated || tracker.0.faces().is_empty() {
+    if !**updated || tracker.tracker.num_visible_faces() == 0 {
         return;
     }
 
     buffer.clear();
 
-    for face in tracker.0.faces() {
+    for (index, face) in tracker.tracker.faces().iter().enumerate() {
+        if !face.is_alive() {
+            continue;
+        }
+
+        let features = &tracker.features.current_features()[index];
         let update = FaceUpdate::from_tracked_face(
             face,
+            features,
             camera.resolution.x as f32,
             camera.resolution.y as f32,
             time.elapsed_secs_f64(),
@@ -522,9 +542,9 @@ fn send_packets(
 fn dump_debug_images(
     tracker: Res<ActiveTracker>,
 ) {
-    for (name, image) in tracker.0.iter_debug_images() {
+    for (name, image) in tracker.tracker.iter_debug_images() {
         let path = format!("{name}.exr");
-        let mut image = tracker.0.denormalise_image(image);
+        let mut image = tracker.tracker.denormalise_image(image);
         if let Err(err) = image.save(&path) {
             error!("Failed to write {path}: {err}");
         } else {
@@ -532,7 +552,7 @@ fn dump_debug_images(
         }
 
         if name == "face_scratch_res" {
-            if let Some(face) = tracker.0.faces().last() {
+            if let Some(face) = tracker.tracker.visible_faces().last() {
                 let path = "landmarks.exr";
                 let out_size = uvec2(image.width(), image.height()).as_vec2();
                 let min = face.image_min().as_vec2();

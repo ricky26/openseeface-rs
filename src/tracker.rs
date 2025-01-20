@@ -136,6 +136,8 @@ static IMAGE_PREPARER: LazyLock<ImagePreparer> = LazyLock::new(|| {
     ImagePreparer { std, mean, default }
 });
 
+
+
 #[derive(Clone, Debug)]
 pub struct TrackerConfig {
     pub size: UVec2,
@@ -151,7 +153,6 @@ pub struct TrackerConfig {
     pub use_retinaface: bool,
     pub use_internal_face_detection: bool,
     pub assume_fullscreen_face: bool,
-    pub max_feature_updates: f64,
     pub static_model: bool,
     pub feature_level: usize,
 }
@@ -172,7 +173,6 @@ impl Default for TrackerConfig {
             use_retinaface: false,
             use_internal_face_detection: true,
             assume_fullscreen_face: false,
-            max_feature_updates: 0.0,
             static_model: false,
             feature_level: 2,
         }
@@ -227,26 +227,30 @@ pub struct Tracker {
     eyes_scratch_32: Rgb32FImage,
     image_prep: &'static ImagePreparer,
     frame_count: usize,
-    tracked_faces: Vec<TrackedFace>,
-    num_tracked_faces: usize,
+    faces: Vec<TrackedFace>,
+    tracked_faces: Vec<usize>,
     wait_count: usize,
-    face_boxes: Vec<(Vec2, Vec2)>,
+    face_detections: Vec<(Vec2, Vec2)>,
     pending_faces: Vec<PendingFace>,
     num_pending_faces: usize,
     pending_face_indices: Vec<usize>,
 }
 
 impl Tracker {
-    pub fn face_boxes(&self) -> &[(Vec2, Vec2)] {
-        &self.face_boxes
+    pub fn face_detections(&self) -> &[(Vec2, Vec2)] {
+        &self.face_detections
     }
 
     pub fn faces(&self) -> &[TrackedFace] {
-        &self.tracked_faces[..self.num_tracked_faces]
+        &self.faces
     }
 
-    pub fn pending_faces(&self) -> &[PendingFace] {
-        &self.pending_faces[..self.num_pending_faces]
+    pub fn num_visible_faces(&self) -> usize {
+        self.tracked_faces.len()
+    }
+
+    pub fn visible_faces(&self) -> impl Iterator<Item = &TrackedFace> {
+        self.tracked_faces.iter().map(|&idx| &self.faces[idx])
     }
 
     pub fn iter_debug_images(&self) -> impl Iterator<Item = (&'static str, &Rgb32FImage)> {
@@ -292,11 +296,12 @@ impl Tracker {
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_DETECTION)?;
 
-        let mut tracked_faces = Vec::with_capacity(config.max_faces);
+        let mut faces = Vec::with_capacity(config.max_faces);
+        let tracked_faces = Vec::with_capacity(faces.len());
         let contour_indices = if config.model_type == TrackerModel::ModelT { &CONTOUR_INDICES_T[..] } else { &CONTOUR_INDICES };
 
         for i in 0..(config.max_faces as u32) {
-            tracked_faces.push(TrackedFace::new(i, contour_indices, config.max_feature_updates));
+            faces.push(TrackedFace::new(i, contour_indices));
         }
 
         let (res, out_res, logit_factor) = match config.model_type {
@@ -333,10 +338,10 @@ impl Tracker {
             eyes_scratch_32,
             image_prep,
             frame_count: 0,
+            faces,
             tracked_faces,
-            num_tracked_faces: 0,
             wait_count: 0,
-            face_boxes: Vec::new(),
+            face_detections: Vec::new(),
             pending_faces,
             num_pending_faces: 0,
             pending_face_indices,
@@ -377,7 +382,7 @@ impl Tracker {
                 let h = (2. * r) * scale;
                 let min = vec2(x, y);
                 let max = vec2(w, h);
-                self.face_boxes.push((min, max));
+                self.face_detections.push((min, max));
             }
         }
 
@@ -556,14 +561,14 @@ impl Tracker {
     }
 
     #[tracing::instrument(skip_all)]
-    pub fn detect(&mut self, frame: &Rgb32FImage, now: f64) -> Result<(), ort::Error> {
+    pub fn detect(&mut self, frame: &Rgb32FImage) -> Result<(), ort::Error> {
         self.frame_count += 1;
         self.wait_count += 1;
 
-        let existing_face_count = self.face_boxes.len();
-        if self.face_boxes.is_empty() {
+        let existing_face_count = self.face_detections.len();
+        if self.face_detections.is_empty() {
             if self.config.use_retinaface {
-                self.retinaface_detect.detect(frame, &mut self.face_boxes)?;
+                self.retinaface_detect.detect(frame, &mut self.face_detections)?;
             }
 
             if self.config.use_internal_face_detection {
@@ -571,16 +576,16 @@ impl Tracker {
             }
 
             if self.config.assume_fullscreen_face {
-                self.face_boxes.push((
+                self.face_detections.push((
                     Vec2::ZERO, vec2(self.config.size.x as f32, self.config.size.y as f32)));
             }
 
             self.wait_count = 0;
-        } else if self.face_boxes.len() >= self.config.max_faces {
+        } else if self.face_detections.len() >= self.config.max_faces {
             self.wait_count = 0;
         } else if self.wait_count >= self.config.scan_every {
             if self.config.use_retinaface {
-                self.retinaface_scan.detect(frame, &mut self.face_boxes)?;
+                self.retinaface_scan.detect(frame, &mut self.face_detections)?;
             }
 
             if self.config.use_internal_face_detection {
@@ -590,12 +595,12 @@ impl Tracker {
             self.wait_count = 0;
         }
 
-        if self.face_boxes.is_empty() {
+        if self.face_detections.is_empty() {
             return Ok(());
         }
 
         self.num_pending_faces = 0;
-        let mut face_boxes = std::mem::take(&mut self.face_boxes);
+        let mut face_boxes = std::mem::take(&mut self.face_detections);
         for (index, (min, size)) in face_boxes.drain(..).enumerate() {
             if self.num_pending_faces >= self.pending_faces.len() {
                 break;
@@ -627,7 +632,7 @@ impl Tracker {
             face.landmarks.extend([eye_r, eye_l]);
             face.update_bounds();
         }
-        self.face_boxes = face_boxes;
+        self.face_detections = face_boxes;
 
         self.pending_face_indices.clear();
         self.pending_face_indices.extend(0..self.num_pending_faces);
@@ -651,17 +656,20 @@ impl Tracker {
         }
         self.pending_face_indices.retain(|&idx| !self.pending_faces[idx].disabled);
 
-        self.num_tracked_faces = 0;
+        let mut num_tracked_faces = 0;
+        self.tracked_faces.clear();
+        self.tracked_faces.extend(0..self.faces.len());
         while !self.pending_face_indices.is_empty()
-            && self.num_tracked_faces < self.tracked_faces.len() {
+            && num_tracked_faces < self.faces.len() {
 
-            let tracked = &self.tracked_faces[self.num_tracked_faces..];
+            let indices = &self.tracked_faces[num_tracked_faces..];
             let mut best = None;
 
             for (pending_idx, &face_index) in self.pending_face_indices.iter().enumerate() {
                 let pending = &self.pending_faces[face_index];
 
-                for (tracked_idx, face) in tracked.iter().enumerate() {
+                for (tracked_idx, &face_index) in indices.iter().enumerate() {
+                    let face = &self.faces[face_index];
                     let dist2 = if face.is_alive() {
                         (face.centre() - pending.centre).length_squared()
                     } else {
@@ -675,12 +683,15 @@ impl Tracker {
 
             let (_, pending_idx, tracked_idx) = best.unwrap();
             let idx = self.pending_face_indices.swap_remove(pending_idx);
+            let face_index = self.tracked_faces[num_tracked_faces + tracked_idx];
+            self.tracked_faces.swap(num_tracked_faces, num_tracked_faces + tracked_idx);
+            num_tracked_faces += 1;
 
             let pending = &mut self.pending_faces[idx];
-            let tracked = &mut self.tracked_faces[tracked_idx];
+            let tracked = &mut self.faces[face_index];
             let centre = pending.centre;
             let size = pending.size;
-            self.face_boxes.push((centre - size * 0.5, size));
+            self.face_detections.push((centre - size * 0.5, size));
 
             tracked.update(
                 frame.width(),
@@ -691,14 +702,12 @@ impl Tracker {
                 pending.size,
                 &mut pending.landmark_confidence,
                 &mut pending.landmarks,
-                now,
             );
 
-            self.tracked_faces.swap(self.num_tracked_faces, tracked_idx);
-            self.num_tracked_faces += 1;
         }
 
-        for face in &mut self.tracked_faces[self.num_tracked_faces..] {
+        for index in self.tracked_faces.drain(num_tracked_faces..) {
+            let face = &mut self.faces[index];
             face.reset();
         }
 

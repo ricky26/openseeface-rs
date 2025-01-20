@@ -73,13 +73,13 @@ fn send_packet(
     target: &SocketAddr,
     buffer: &mut Vec<u8>,
 ) -> std::io::Result<()> {
-    if tracker.faces().is_empty() {
+    if tracker.visible_faces().is_empty() {
         return Ok(());
     }
 
     buffer.clear();
 
-    for face in tracker.faces() {
+    for face in tracker.visible_faces() {
         let update = FaceUpdate::from_tracked_face(face, width, height, time);
         update.write::<byteorder::LittleEndian>(&mut *buffer);
     }
