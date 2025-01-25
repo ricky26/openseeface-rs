@@ -153,23 +153,37 @@ impl FeatureTracker {
 /// OpenSeeFace tracking features.
 ///
 /// All features are in range 0..1.
+///
+/// Left/right here refer to the elements to the left/right of the image.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Features {
     /// Left eye open amount.
     pub eye_l: f32,
     /// Right eye open amount.
     pub eye_r: f32,
+    /// Left eyebrow raise amount.
     pub eyebrow_updown_l: f32,
+    /// Right eyebrow raise amount.
     pub eyebrow_updown_r: f32,
+    /// Left eyebrow quirk amount (greater value means more deviation from flat eyebrow shape).
     pub eyebrow_quirk_l: f32,
+    /// Right eyebrow quirk amount (greater value means more deviation from flat eyebrow shape).
     pub eyebrow_quirk_r: f32,
+    /// Left eyebrow steepness (greater means steeper).
     pub eyebrow_steepness_l: f32,
+    /// Right eyebrow steepness (greater means steeper).
     pub eyebrow_steepness_r: f32,
+    /// Left mouth corner lower amount.
     pub mouth_corner_updown_l: f32,
+    /// Right mouth corner lower amount.
     pub mouth_corner_updown_r: f32,
+    /// Left mouth corner outwards amount.
     pub mouth_corner_inout_l: f32,
+    /// Right mouth corner outwards amount.
     pub mouth_corner_inout_r: f32,
+    /// Greater if mouth is more open.
     pub mouth_open: f32,
+    /// Greater if mouth is horizontally stretched.
     pub mouth_wide: f32,
 }
 
