@@ -4,7 +4,6 @@ use glam::{uvec2, vec2, vec3, Mat2, UVec2, Vec2, Vec3};
 use image::{GenericImage, GenericImageView, Rgb, Rgb32FImage, SubImage};
 use imageproc::geometric_transformations::{warp_into, Interpolation, Projection};
 use ndarray::{s, ArrayViewD, Axis};
-use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 
 use crate::face::TrackedFace;
@@ -283,16 +282,12 @@ impl Tracker {
 
         let model_data = model_data(config.model_type);
         let landmark_model = Session::builder()?
-            .with_inter_threads(1)?
             .with_intra_threads(config.max_threads.min(4))?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
             .commit_from_memory(model_data)?;
         let gaze_model = Session::builder()?
-            .with_inter_threads(1)?
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_GAZE)?;
         let detect_model = Session::builder()?
-            .with_inter_threads(1)?
             .with_intra_threads(1)?
             .commit_from_memory(MODEL_DETECTION)?;
 
