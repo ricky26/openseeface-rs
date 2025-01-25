@@ -4332,6 +4332,7 @@ dependencies = [
  "image",
  "nokhwa",
  "openseeface",
+ "tracing",
 ]
 
 [[package]]

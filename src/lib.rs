@@ -1,4 +1,4 @@
-pub(crate) mod image;
+pub mod image;
 pub(crate) mod retinaface;
 pub mod protocol;
 pub mod face;

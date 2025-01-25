@@ -6,12 +6,12 @@ use clap::Parser;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::CallbackCamera;
-use image::buffer::ConvertBuffer;
 use tracing::{info, span, Level};
 use tracing_subscriber::{EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-
+use openseeface::features::openseeface::TrackerFeatures;
+use openseeface::image::rgb_to_rgb32f;
 use openseeface::protocol::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel};
 
@@ -69,18 +69,25 @@ fn send_packet(
     width: f32,
     height: f32,
     tracker: &Tracker,
+    features: &TrackerFeatures,
     socket: &UdpSocket,
     target: &SocketAddr,
     buffer: &mut Vec<u8>,
 ) -> std::io::Result<()> {
-    if tracker.visible_faces().is_empty() {
+    if tracker.num_visible_faces() == 0 {
         return Ok(());
     }
 
     buffer.clear();
 
-    for face in tracker.visible_faces() {
-        let update = FaceUpdate::from_tracked_face(face, width, height, time);
+    let features =  features.current_features();
+    for (index, face) in tracker.faces().iter().enumerate() {
+        if !face.is_alive() {
+            continue;
+        }
+
+        let features = &features[index];
+        let update = FaceUpdate::from_tracked_face(face, features, width, height, time);
         update.write::<byteorder::LittleEndian>(&mut *buffer);
     }
 
@@ -148,11 +155,13 @@ fn main() -> anyhow::Result<()> {
     info!("Starting camera stream {}", camera_format);
     camera.open_stream()?;
 
+    let mut features = TrackerFeatures::new(config.max_faces, 0.);
     let mut tracker = Tracker::new(config)?;
     let epoch = Instant::now();
     let width = camera_format.width() as f32;
     let height = camera_format.height() as f32;
     let mut buffer = Vec::new();
+    let mut image_rgb32f = Default::default();
     while let Ok(Some(frame)) = frame_rx.recv() {
         let span = span!(Level::DEBUG, "frame");
         let _span = span.enter();
@@ -161,10 +170,12 @@ fn main() -> anyhow::Result<()> {
         let now64 = (now - epoch).as_secs_f64();
 
         let image = span!(Level::DEBUG, "decode").in_scope(|| frame.decode_image::<RgbFormat>())?;
-        let image = span!(Level::DEBUG, "convert").in_scope(|| image.convert());
-        tracker.detect(&image, now64)?;
+        span!(Level::DEBUG, "convert")
+            .in_scope(|| rgb_to_rgb32f(&mut image_rgb32f, &image));
+        tracker.detect(&image_rgb32f)?;
+        features.update(tracker.faces(), now64);
 
-        send_packet(now64, width, height, &tracker, &socket, &target, &mut buffer)?;
+        send_packet(now64, width, height, &tracker, &features, &socket, &target, &mut buffer)?;
 
         #[cfg(feature = "tracing")]
         tracing::event!(Level::DEBUG, message = "frame end", tracy.frame_mark = true);

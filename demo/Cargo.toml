@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 openseeface = { path = ".." }
+tracing = { workspace = true, features = ["release_max_level_debug"] }
 clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
 byteorder = { workspace = true }

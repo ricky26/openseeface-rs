@@ -487,6 +487,7 @@ impl Tracker {
         Ok((eye_r, eye_l))
     }
 
+    #[tracing::instrument(skip_all)]
     fn detect_landmarks(
         &mut self, frame: &Rgb32FImage, face_index: usize, min: Vec2, max: Vec2,
     ) -> Result<f32, ort::Error> {

@@ -1,6 +1,7 @@
 use std::fmt::Write;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
+
 use anyhow::{anyhow, bail, Context};
 use bevy::asset::RenderAssetUsages;
 use bevy::audio::AudioPlugin;
@@ -14,14 +15,14 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::utils::tracing::span;
 use bevy_inspector_egui::DefaultInspectorConfigPlugin;
 use clap::Parser;
-use image::buffer::ConvertBuffer;
-use image::{Rgb, RgbaImage};
+use image::{Rgb, Rgb32FImage, RgbImage, RgbaImage};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType, Resolution};
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
 use openseeface::features::openseeface::TrackerFeatures;
+use openseeface::image::{rgb_to_rgb32f, rgb_to_rgba};
 use openseeface::protocol::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
 
@@ -84,7 +85,7 @@ fn main() -> anyhow::Result<()> {
             RequestedFormatType::HighestResolution(resolution));
     }
 
-    let (frame_tx, frame_rx) = crossbeam_channel::bounded(2);
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded(0);
     let frame_tx_clone = frame_tx.clone();
     let mut camera = CallbackCamera::new(
         CameraIndex::Index(camera_index),
@@ -92,7 +93,7 @@ fn main() -> anyhow::Result<()> {
         move |buffer| {
             let span = span!(Level::DEBUG, "camera frame");
             let _span = span.enter();
-            frame_tx_clone.try_send(buffer).ok();
+            frame_tx_clone.send(buffer).ok();
         },
     )?;
 
@@ -159,7 +160,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     app
-        .init_resource::<TrackingUpdated>()
+        .init_resource::<CameraImageBuffers>()
         .insert_resource(Epoch(epoch))
         .insert_resource(active_tracker)
         .insert_resource(CameraFrameRx(frame_rx))
@@ -180,13 +181,20 @@ fn main_plugin(app: &mut App) {
             (
                 handle_new_camera_frames.run_if(input_toggle_active(true, KeyCode::F6)),
                 (
+                    (
+                        detect_faces,
+                        upload_camera_image,
+                    ).run_if(new_camera_image),
                     draw_detections.run_if(input_toggle_active(false, KeyCode::F1)),
                     draw_landmarks.run_if(input_toggle_active(false, KeyCode::F2)),
                     draw_reference_face.run_if(input_toggle_active(false, KeyCode::F3)),
                     draw_face_3d.run_if(input_toggle_active(true, KeyCode::F4)),
                 ),
             ).chain(),
-            send_packets.run_if(resource_exists::<OsfTarget>),
+            send_packets
+                .after(detect_faces)
+                .run_if(resource_exists::<OsfTarget>)
+                .run_if(new_camera_image),
             save_obj.run_if(input_just_pressed(KeyCode::F10)),
             dump_debug_images.run_if(input_just_pressed(KeyCode::F11)),
         ));
@@ -255,53 +263,64 @@ pub struct CameraInfo {
     pub resolution: UVec2,
 }
 
-#[derive(Clone, Debug, Default, Deref, DerefMut, Resource)]
-pub struct TrackingUpdated(pub bool);
+#[derive(Clone, Debug, Default, Resource)]
+pub struct CameraImageBuffers {
+    pub rgb: RgbImage,
+    pub float: Rgb32FImage,
+}
 
-#[allow(clippy::too_many_arguments)]
+fn new_camera_image(buffers: Res<CameraImageBuffers>) -> bool {
+    buffers.is_changed() && !buffers.rgb.as_raw().is_empty()
+}
+
+
 fn handle_new_camera_frames(
+    frame_rx: Res<CameraFrameRx>,
+    mut camera_images: ResMut<CameraImageBuffers>,
+) {
+    if let Ok(frame) = frame_rx.0.try_recv() {
+        let camera_images = &mut *camera_images;
+        camera_images.rgb = span!(Level::TRACE, "decode")
+            .in_scope(|| frame.decode_image::<RgbFormat>())
+            .expect("camera frame should be decodable");
+        span!(Level::TRACE, "convert")
+            .in_scope(|| rgb_to_rgb32f(&mut camera_images.float, &camera_images.rgb));
+    }
+}
+
+fn detect_faces(
+    epoch: Res<Epoch>,
+    mut tracker: ResMut<ActiveTracker>,
+    camera_images: Res<CameraImageBuffers>,
+) {
+    let now = Instant::now();
+    let now64 = (now - epoch.0).as_secs_f64();
+
+    let tracker = &mut *tracker;
+    if let Err(err) = tracker.tracker.detect(&camera_images.float) {
+        warn!("failed to track frame: {err}");
+    }
+
+    let faces = tracker.tracker.faces();
+    tracker.features.update(faces, now64);
+}
+
+fn upload_camera_image(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera_image: Res<CameraImage>,
     camera_material: Res<CameraMaterial>,
-    epoch: Res<Epoch>,
-    frame_rx: Res<CameraFrameRx>,
-    mut tracker: ResMut<ActiveTracker>,
-    mut updated: ResMut<TrackingUpdated>,
+    camera_images: Res<CameraImageBuffers>,
 ) {
-    **updated = false;
+    let Some(texture) = images.get_mut(&camera_image.0) else {
+        return;
+    };
 
-    if let Ok(frame) = frame_rx.0.try_recv() {
-        let span = span!(Level::DEBUG, "frame");
-        let _span = span.enter();
-
-        **updated = true;
-
-        let now = Instant::now();
-        let now64 = (now - epoch.0).as_secs_f64();
-
-        let image = span!(Level::DEBUG, "decode")
-            .in_scope(|| frame.decode_image::<RgbFormat>())
-            .expect("camera frame should be decodable");
-        let image = image.convert();
-        let tracker = &mut *tracker;
-        if let Err(err) = tracker.tracker.detect(&image) {
-            warn!("failed to track frame: {err}");
-        }
-
-        let faces = tracker.tracker.faces();
-        tracker.features.update(faces, now64);
-
-        let span = span!(Level::DEBUG, "upload texture");
-        let _span = span.enter();
-        let Some(texture) = images.get_mut(&camera_image.0) else {
-            return;
-        };
-
-        let rgba: RgbaImage = image.convert();
-        texture.data.copy_from_slice(rgba.as_raw());
-        materials.get_mut(&camera_material.0);
-    }
+    let mut rgba = RgbaImage::from_raw(
+        texture.width(), texture.height(), std::mem::take(&mut texture.data)).unwrap();
+    rgb_to_rgba(&mut rgba, &camera_images.rgb);
+    texture.data = rgba.into_raw();
+    materials.get_mut(&camera_material.0);
 }
 
 fn draw_detections(
@@ -511,10 +530,9 @@ fn send_packets(
     target: Res<OsfTarget>,
     camera: Res<CameraInfo>,
     tracker: Res<ActiveTracker>,
-    updated: Res<TrackingUpdated>,
     mut buffer: Local<Vec<u8>>,
 ) {
-    if !**updated || tracker.tracker.num_visible_faces() == 0 {
+    if tracker.tracker.num_visible_faces() == 0 {
         return;
     }
 

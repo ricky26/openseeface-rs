@@ -372,6 +372,7 @@ impl TrackedFace {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     pub(crate) fn update(
         &mut self,
         frame_width: u32,
