@@ -10,7 +10,8 @@ use tracing::{info, span, Level};
 use tracing_subscriber::{EnvFilter, Registry};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use openseeface::features::openseeface::TrackerFeatures;
+use openseeface::features::FeatureTracker;
+use openseeface::features::openseeface::{FeatureExtractor, Features};
 use openseeface::image::rgb_to_rgb32f;
 use openseeface::protocol::openseeface::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel};
@@ -69,7 +70,7 @@ fn send_packet(
     width: f32,
     height: f32,
     tracker: &Tracker,
-    features: &TrackerFeatures,
+    features: &[Features],
     socket: &UdpSocket,
     target: &SocketAddr,
     buffer: &mut Vec<u8>,
@@ -80,7 +81,6 @@ fn send_packet(
 
     buffer.clear();
 
-    let features =  features.current_features();
     for (index, face) in tracker.faces().iter().enumerate() {
         if !face.is_alive() {
             continue;
@@ -155,7 +155,7 @@ fn main() -> anyhow::Result<()> {
     info!("Starting camera stream {}", camera_format);
     camera.open_stream()?;
 
-    let mut features = TrackerFeatures::new(config.max_faces, 0.);
+    let mut features = FeatureTracker::<FeatureExtractor>::new(config.max_faces);
     let mut tracker = Tracker::new(config)?;
     let epoch = Instant::now();
     let width = camera_format.width() as f32;
@@ -175,7 +175,16 @@ fn main() -> anyhow::Result<()> {
         tracker.detect(&image_rgb32f)?;
         features.update(tracker.faces(), now64);
 
-        send_packet(now64, width, height, &tracker, &features, &socket, &target, &mut buffer)?;
+        send_packet(
+            now64,
+            width,
+            height,
+            &tracker,
+            features.current_features(),
+            &socket,
+            &target,
+            &mut buffer
+        )?;
 
         #[cfg(feature = "tracing")]
         tracing::event!(Level::DEBUG, message = "frame end", tracy.frame_mark = true);

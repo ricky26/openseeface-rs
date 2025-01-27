@@ -21,7 +21,8 @@ use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatTyp
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
-use openseeface::features::openseeface::TrackerFeatures;
+use openseeface::features::FeatureTracker;
+use openseeface::features::openseeface::FeatureExtractor;
 use openseeface::image::{rgb_to_rgb32f, rgb_to_rgba};
 use openseeface::protocol::openseeface::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
@@ -109,8 +110,8 @@ fn main() -> anyhow::Result<()> {
         config.max_threads = max_threads;
     }
 
+    let features = FeatureTracker::new(config.max_faces);
     let tracker = Tracker::new(config)?;
-    let features = TrackerFeatures::new(tracker.faces().len(), 0.);
     let epoch = Instant::now();
     let mut app = App::default();
     app
@@ -249,7 +250,7 @@ pub struct CameraFrameRx(crossbeam_channel::Receiver<Buffer>);
 #[derive(Resource)]
 pub struct ActiveTracker {
     pub tracker: Tracker,
-    pub features: TrackerFeatures,
+    pub features: FeatureTracker<FeatureExtractor>,
 }
 
 #[derive(Clone, Debug, Resource)]

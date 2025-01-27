@@ -1,7 +1,9 @@
 use glam::{Vec2, Vec3};
 use remedian::RemedianBlock;
 use serde::{Deserialize, Serialize};
-use crate::face::{FaceLandmarks3d, TrackedFace};
+
+use crate::face::TrackedFace;
+use crate::features::{FeatureExtractor as FeatureExtractorTrait};
 
 fn align_points(a: Vec2, b: Vec2, points: &mut [Vec2]) -> f32 {
     let angle = (b - a).to_angle();
@@ -10,6 +12,12 @@ fn align_points(a: Vec2, b: Vec2, points: &mut [Vec2]) -> f32 {
         *point = a + rot.rotate(*point - a);
     }
     angle
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Config {
+    pub max_feature_updates: f64,
+    pub full: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -188,7 +196,7 @@ pub struct Features {
 }
 
 #[derive(Clone, Debug)]
-struct FeatureExtractor {
+pub struct FeatureExtractor {
     eye_l: FeatureTracker,
     eye_r: FeatureTracker,
     eyebrow_updown_l: FeatureTracker,
@@ -203,10 +211,74 @@ struct FeatureExtractor {
     mouth_corner_inout_r: FeatureTracker,
     mouth_open: FeatureTracker,
     mouth_wide: FeatureTracker,
+    full: bool,
+}
+
+impl Default for FeatureExtractor {
+    fn default() -> Self {
+        FeatureExtractor::from_config(Config::default())
+    }
 }
 
 impl FeatureExtractor {
-    pub fn new(max_feature_updates: f64) -> FeatureExtractor {
+    fn update_eye(
+        tracker: &mut FeatureTracker,
+        feature: &mut f32,
+        points: &[Vec3],
+        offset: usize,
+        norm_distance_y: f32,
+        now: f64,
+    ) -> f32 {
+        let mut f_pts = [
+            points[offset + 1].truncate(),
+            points[offset + 2].truncate(),
+            points[offset + 5].truncate(),
+            points[offset + 4].truncate(),
+        ];
+        let a = align_points(points[offset + 3].truncate(), points[offset].truncate(), &mut f_pts);
+        let f = (f_pts[0].y + f_pts[1].y - f_pts[2].y - f_pts[3].y) / (2. * norm_distance_y);
+        *feature = tracker.update(f, now);
+        a
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn update_eyebrow(
+        steepness_tracker: &mut FeatureTracker,
+        steepness: &mut f32,
+        quirk_tracker: &mut FeatureTracker,
+        quirk: &mut f32,
+        points: &[Vec3],
+        offset: usize,
+        norm_angle: f32,
+        norm_distance_y: f32,
+        now: f64,
+    ) {
+        let mut f_pts = [
+            points[offset].truncate(),
+            points[offset + 1].truncate(),
+            points[offset + 2].truncate(),
+            points[offset + 3].truncate(),
+            points[offset + 4].truncate(),
+        ];
+        let a = align_points(points[offset].truncate(), points[offset + 4].truncate(), &mut f_pts);
+        let f = -a.to_degrees() - norm_angle;
+        *steepness = steepness_tracker.update(f, now);
+        let f = f_pts[1..4]
+            .iter()
+            .map(|v| (v.y - f_pts[0].y).abs())
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .unwrap()
+            / norm_distance_y;
+        *quirk = quirk_tracker.update(f, now);
+    }
+}
+
+impl FeatureExtractorTrait for FeatureExtractor {
+    type Features = Features;
+    type Config = Config;
+
+    fn from_config(config: Self::Config) -> Self {
+        let Config { max_feature_updates, .. } = config;
         FeatureExtractor {
             eye_l: FeatureTracker::new(FeatureConfig {
                 max_feature_updates,
@@ -271,63 +343,13 @@ impl FeatureExtractor {
                 max_feature_updates,
                 ..Default::default()
             }),
+            full: config.full,
         }
     }
 
-    fn update_eye(
-        tracker: &mut FeatureTracker,
-        feature: &mut f32,
-        points: &[Vec3],
-        offset: usize,
-        norm_distance_y: f32,
-        now: f64,
-    ) -> f32 {
-        let mut f_pts = [
-            points[offset + 1].truncate(),
-            points[offset + 2].truncate(),
-            points[offset + 5].truncate(),
-            points[offset + 4].truncate(),
-        ];
-        let a = align_points(points[offset + 3].truncate(), points[offset].truncate(), &mut f_pts);
-        let f = (f_pts[0].y + f_pts[1].y - f_pts[2].y - f_pts[3].y) / (2. * norm_distance_y);
-        *feature = tracker.update(f, now);
-        a
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn update_eyebrow(
-        steepness_tracker: &mut FeatureTracker,
-        steepness: &mut f32,
-        quirk_tracker: &mut FeatureTracker,
-        quirk: &mut f32,
-        points: &[Vec3],
-        offset: usize,
-        norm_angle: f32,
-        norm_distance_y: f32,
-        now: f64,
-    ) {
-        let mut f_pts = [
-            points[offset].truncate(),
-            points[offset + 1].truncate(),
-            points[offset + 2].truncate(),
-            points[offset + 3].truncate(),
-            points[offset + 4].truncate(),
-        ];
-        let a = align_points(points[offset].truncate(), points[offset + 4].truncate(), &mut f_pts);
-        let f = -a.to_degrees() - norm_angle;
-        *steepness = steepness_tracker.update(f, now);
-        let f = f_pts[1..4]
-            .iter()
-            .map(|v| (v.y - f_pts[0].y).abs())
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
-            .unwrap()
-            / norm_distance_y;
-        *quirk = quirk_tracker.update(f, now);
-    }
-
-    pub fn update(&mut self, points: &FaceLandmarks3d, now: f64, full: bool) -> Features {
-        let mut features = Features::default();
-
+    fn update(&mut self, features: &mut Self::Features, face: &TrackedFace, now: f64) {
+        let full = self.full;
+        let points = face.face_3d();
         let norm_distance_x = (points[0].x - points[16].x + points[1].x - points[15].x) / 2.;
         let norm_distance_y = (points[27].y - points[30].y) / 3.;
 
@@ -414,37 +436,5 @@ impl FeatureExtractor {
 
         let f = (points[58].x - points[62].x).abs() / norm_distance_x;
         features.mouth_wide = self.mouth_wide.update(f, now);
-
-        features
-    }
-}
-
-pub struct TrackerFeatures {
-    feature_extractors: Vec<FeatureExtractor>,
-    current_features: Vec<Features>,
-}
-
-impl TrackerFeatures {
-    pub fn current_features(&self) -> &[Features] {
-        &self.current_features
-    }
-
-    pub fn new(max_faces: usize, max_feature_updates: f64) -> TrackerFeatures {
-        let feature_extractors = vec![FeatureExtractor::new(max_feature_updates); max_faces];
-        let current_features = vec![Features::default(); max_faces];
-        TrackerFeatures {
-            feature_extractors,
-            current_features,
-        }
-    }
-
-    pub fn update(&mut self, faces: &[TrackedFace], now: f64) {
-        for ((face, extractor), features) in faces.iter()
-            .zip(&mut self.feature_extractors)
-            .zip(&mut self.current_features) {
-            if face.has_pose() {
-                *features = extractor.update(face.face_3d(), now, true);
-            }
-        }
     }
 }
