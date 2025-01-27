@@ -1,4 +1,5 @@
 use bevy::color::palettes::css::{DARK_GREEN, GREEN, WHITE};
+use bevy::input::common_conditions::input_just_pressed;
 use bevy::prelude::*;
 use crate::ActiveTracker;
 
@@ -38,6 +39,7 @@ fn spawn_ui(mut commands: Commands) {
                 right: Val::Px(0.),
                 ..default()
             },
+            Visibility::Hidden,
         ))
         .with_children(|parent| {
             parent
@@ -55,10 +57,16 @@ fn spawn_ui(mut commands: Commands) {
                         parent.spawn((
                             Name::new(name),
                             Node {
-                                height: Val::Px(20.),
+                                height: Val::Px(16.),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::Center,
                                 ..default()
                             },
                             Text::new(name),
+                            TextFont {
+                                font_size: 16.,
+                                ..default()
+                            },
                             Label,
                         ));
                     }
@@ -81,8 +89,8 @@ fn spawn_ui(mut commands: Commands) {
                                 Name::new(name),
                                 Node {
                                     width: Val::Px(80.),
-                                    height: Val::Px(20.),
-                                    padding: UiRect::all(Val::Px(5.)),
+                                    height: Val::Px(14.),
+                                    margin: UiRect::all(Val::Px(1.)),
                                     border: UiRect::all(Val::Px(1.)),
                                     ..default()
                                 },
@@ -121,7 +129,8 @@ fn update_ui(
         return;
     };
 
-    let features = &tracker.features.current_features()[index];
+    let features = tracker.features.current_features();
+    let features = &features[index];
     let feature_list = [
         features.eye_l,
         features.eye_r,
@@ -149,10 +158,15 @@ fn update_ui(
     }
 }
 
+fn toggle_ui(mut feature_ui: Single<&mut Visibility, With<FeaturesUi>>) {
+    feature_ui.toggle_inherited_hidden();
+}
+
 pub fn plugin(app: &mut App) {
     app
         .add_systems(Startup, spawn_ui)
         .add_systems(Update, (
             update_ui,
+            toggle_ui.run_if(input_just_pressed(KeyCode::F5)),
         ));
 }
