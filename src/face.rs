@@ -1,5 +1,4 @@
 use glam::{uvec2, vec2, vec3, Mat3, Quat, UVec2, Vec2, Vec3};
-use sqpnp::{SqPnPSolution, SqPnPSolver};
 
 pub const NUM_FACE_LANDMARKS: usize = 70;
 pub type FaceLandmarks3d = [Vec3; NUM_FACE_LANDMARKS];
@@ -168,7 +167,7 @@ pub struct TrackedFace {
     alive: bool,
     has_pnp: bool,
     pnp_error: f32,
-    pnp_solver: SqPnPSolver,
+    pnp_solver: sqpnp::Solver,
     frame_count: usize,
     centre: Vec2,
     size: Vec2,
@@ -232,7 +231,7 @@ impl TrackedFace {
         self.pnp_error
     }
 
-    pub fn pose_solutions(&self) -> &[SqPnPSolution] {
+    pub fn pose_solutions(&self) -> &[sqpnp::Solution] {
         self.pnp_solver.solutions()
     }
 
@@ -256,7 +255,7 @@ impl TrackedFace {
         id: u32,
         contour_indices: &'static [usize],
     ) -> TrackedFace {
-        let pnp_solver = SqPnPSolver::new();
+        let pnp_solver = sqpnp::Solver::new();
         let face_3d = DEFAULT_FACE;
         let contour_3d = contour_indices.iter()
             .map(|&idx| face_3d[idx])

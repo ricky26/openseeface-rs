@@ -5288,9 +5288,9 @@ dependencies = [
 
 [[package]]
 name = "sqpnp"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1b7dc6594dea329f22df4ad05e69ad525472b664842ab30d2a02cf9f0aa3c19"
+checksum = "9588b24aa069a6c80e85cfc17686180edd06e1fab8f3ebe7b84991b14c7718f3"
 dependencies = [
  "glam",
  "nalgebra 0.33.2",
