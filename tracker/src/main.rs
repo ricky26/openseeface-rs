@@ -12,7 +12,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use openseeface::features::openseeface::TrackerFeatures;
 use openseeface::image::rgb_to_rgb32f;
-use openseeface::protocol::FaceUpdate;
+use openseeface::protocol::openseeface::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel};
 
 #[derive(Parser)]

@@ -23,7 +23,7 @@ use nokhwa::{Buffer, CallbackCamera};
 use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
 use openseeface::features::openseeface::TrackerFeatures;
 use openseeface::image::{rgb_to_rgb32f, rgb_to_rgba};
-use openseeface::protocol::FaceUpdate;
+use openseeface::protocol::openseeface::FaceUpdate;
 use openseeface::tracker::{Tracker, TrackerConfig, TrackerModel, CONTOUR_INDICES};
 
 pub mod inspector;

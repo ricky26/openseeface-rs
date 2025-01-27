@@ -1,3 +1,8 @@
+//! Implementation of OpenSeeFace protocol.
+//!
+//! This protocol is used to communicate current pose information to VSeeFace
+//! and other OpenSeeFace compatible software.
+
 use std::io::Write;
 
 use byteorder::{ByteOrder, WriteBytesExt};
@@ -6,25 +11,55 @@ use glam::{vec3, EulerRot, Quat, Vec2, Vec3};
 use crate::face::TrackedFace;
 use crate::features::openseeface::Features;
 
+/// A single face update packet.
+///
+/// These are used to broadcast new face pose information.
 pub struct FaceUpdate<'a> {
+    /// Time this update was recorded.
+    ///
+    /// This can be from any offset but should be counted in seconds.
     pub timestamp: f64,
+    /// The ID of this face.
+    ///
+    /// Each currently visible face should have a unique ID, and IDs should
+    /// persist whilst the face remains visible.
     pub face_id: u32,
+    /// Width of the source image.
     pub width: f32,
+    /// Height of the source image.
     pub height: f32,
+    /// True if the face was detected in the image.
+    ///
+    /// An update with success set to false set to false should be sent when
+    /// tracking of a given face is lost.
     pub success: bool,
+    /// The squared error of the perspective-n-point placement of the reference
+    /// face.
     pub pnp_error: f32,
+    /// Blink amount of eye leftmost in the image, 0..1.
     pub blink_left: f32,
+    /// Blink amount of eye rightmost in the image, 0..1.
     pub blink_right: f32,
+    /// Rotation of the face in world space.
     pub rotation: Quat,
+    /// [`Self::rotation`] as an Euler rotation.
     pub rotation_euler: Vec3,
+    /// Translation of the face in world sapce.
     pub translation: Vec3,
+    /// Confidence values for each landmark.
     pub landmark_confidence: &'a [f32],
+    /// 2D image-space coordinates for each landmark.
     pub landmarks: &'a [Vec2],
+    /// 3D world-space coordinates for each landmark.
     pub landmarks_3d: &'a [Vec3],
+    /// OpenSeeFace features detected for this face.
     pub features: &'a Features,
 }
 
 impl FaceUpdate<'_> {
+    /// Write this update to a buffer.
+    ///
+    /// Current implementations always use little-endian.
     pub fn write<E: ByteOrder>(&self, out: &mut impl Write) {
         out.write_f64::<E>(self.timestamp).unwrap();
         out.write_u32::<E>(self.face_id).unwrap();
@@ -72,6 +107,11 @@ impl FaceUpdate<'_> {
         out.write_f32::<E>(self.features.mouth_wide).unwrap();
     }
 
+    /// Create a [`FaceUpdate`] from a given [`TrackedFace`] and OpenSeeFace
+    /// [`Features`].
+    ///
+    /// `width` & `height` are the image dimensions.
+    /// `time` should be positive and in seconds.
     pub fn from_tracked_face<'a>(
         face: &'a TrackedFace,
         features: &'a Features,
