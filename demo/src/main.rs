@@ -21,7 +21,7 @@ use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatTyp
 use nokhwa::{Buffer, CallbackCamera};
 
 use openseeface::face::{DEFAULT_FACE, FACE_EDGES};
-use openseeface::features::FeatureTracker;
+use openseeface::features::{arkit, FeatureTracker};
 use openseeface::features::openseeface::FeatureExtractor;
 use openseeface::image::{rgb_to_rgb32f, rgb_to_rgba};
 use openseeface::protocol::openseeface::FaceUpdate;
@@ -110,7 +110,8 @@ fn main() -> anyhow::Result<()> {
         config.max_threads = max_threads;
     }
 
-    let features = FeatureTracker::new(config.max_faces);
+    let osf_features = FeatureTracker::new(config.max_faces);
+    let arkit_features = FeatureTracker::new(config.max_faces);
     let tracker = Tracker::new(config)?;
     let epoch = Instant::now();
     let mut app = App::default();
@@ -157,7 +158,8 @@ fn main() -> anyhow::Result<()> {
 
     let active_tracker = ActiveTracker {
         tracker,
-        features,
+        osf_features,
+        arkit_features,
     };
 
     app
@@ -190,6 +192,7 @@ fn main_plugin(app: &mut App) {
                     draw_landmarks.run_if(input_toggle_active(false, KeyCode::F2)),
                     draw_reference_face.run_if(input_toggle_active(false, KeyCode::F3)),
                     draw_face_3d.run_if(input_toggle_active(true, KeyCode::F4)),
+                    draw_face_2d.run_if(input_toggle_active(false, KeyCode::F9)),
                 ),
             ).chain(),
             send_packets
@@ -250,7 +253,8 @@ pub struct CameraFrameRx(crossbeam_channel::Receiver<Buffer>);
 #[derive(Resource)]
 pub struct ActiveTracker {
     pub tracker: Tracker,
-    pub features: FeatureTracker<FeatureExtractor>,
+    pub osf_features: FeatureTracker<FeatureExtractor>,
+    pub arkit_features: FeatureTracker<arkit::FeatureExtractor<arkit::StaticCalibration>>,
 }
 
 #[derive(Clone, Debug, Resource)]
@@ -303,7 +307,8 @@ fn detect_faces(
     }
 
     let faces = tracker.tracker.faces();
-    tracker.features.update(faces, now64);
+    tracker.osf_features.update(faces, now64);
+    tracker.arkit_features.update(faces, now64);
 }
 
 fn upload_camera_image(
@@ -433,6 +438,30 @@ fn draw_face_3d(
     }
 }
 
+fn draw_face_2d(
+    mut gizmos: Gizmos,
+    tracker: Res<ActiveTracker>,
+) {
+    let offset = vec3(-0.25, 0., 0.);
+    let scale = 0.25;
+
+    for face in tracker.tracker.visible_faces() {
+        if !face.has_pose() {
+            continue;
+        }
+
+        let face_3d = face.face_3d();
+        let transform_point = move |p: Vec3|
+            (p.truncate() * scale).extend(-1.) + offset;
+
+        for &(a, b) in &FACE_EDGES {
+            let pa = transform_point(face_3d[a]);
+            let pb = transform_point(face_3d[b]);
+            gizmos.line(pa, pb, LIME);
+        }
+    }
+}
+
 fn save_obj(
     tracker: Res<ActiveTracker>,
 ) {
@@ -544,7 +573,7 @@ fn send_packets(
             continue;
         }
 
-        let features = &tracker.features.current_features()[index];
+        let features = &tracker.osf_features.current_features()[index];
         let update = FaceUpdate::from_tracked_face(
             face,
             features,

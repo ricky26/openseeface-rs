@@ -1,6 +1,7 @@
 use crate::face::TrackedFace;
 
 pub mod openseeface;
+pub mod arkit;
 
 pub trait FeatureExtractor {
     type Features: Default;
